@@ -1,0 +1,482 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { gradeLocally, isAccepted, POINTS } from "../lib/grader";
+import type { LanguageConfig } from "../lib/languages/types";
+import { playMicOff, playMicOn, playStreak, playVerdict } from "../lib/sounds";
+import { asrSupported, CHARACTERS, listen, speak, stopSpeaking, type Character, type Listening } from "../lib/speech";
+import type { Settings } from "../lib/storage";
+import type { Card, GradeResult, Verdict } from "../lib/types";
+import { Highlight } from "./Highlight";
+import { Mascot, type Mood } from "./Mascot";
+
+export interface LogEntry {
+  card: Card;
+  verdict: Verdict;
+  heard: string;
+}
+
+export interface SessionResult {
+  score: number;
+  bestStreak: number;
+  log: LogEntry[];
+}
+
+type Phase = "intro" | "answer" | "listening" | "checking" | "feedback";
+
+const RANK: Verdict[] = ["perfect", "alternative", "unnatural", "close", "wrong", "skipped"];
+
+const VERDICT_UI: Record<Verdict, { emoji: string; title: string; mood: Mood }> = {
+  perfect: { emoji: "🎯", title: "Perfect!", mood: "cheer" },
+  alternative: { emoji: "✅", title: "Nice — that works too!", mood: "happy" },
+  unnatural: { emoji: "👌", title: "Understood! Smoother way:", mood: "happy" },
+  close: { emoji: "🤏", title: "So close!", mood: "meh" },
+  wrong: { emoji: "💪", title: "Good try!", mood: "sad" },
+  skipped: { emoji: "⏭", title: "Skipped", mood: "idle" },
+};
+
+const ADVANCE_MS: Partial<Record<Verdict, number>> = { perfect: 1100, alternative: 2600, unnatural: 3600 };
+
+export function SessionView({
+  lang,
+  deck,
+  settings,
+  onAttempt,
+  onFinish,
+  onExit,
+}: {
+  lang: LanguageConfig;
+  deck: Card[];
+  settings: Settings;
+  onAttempt: (card: Card, verdict: Verdict) => void;
+  onFinish: (r: SessionResult) => void;
+  onExit: () => void;
+}) {
+  const [queue, setQueue] = useState<Card[]>(deck);
+  const [index, setIndex] = useState(0);
+  const [phase, setPhase] = useState<Phase>("intro");
+  const [showTranslation, setShowTranslation] = useState(false);
+  const [result, setResult] = useState<GradeResult | null>(null);
+  const [gained, setGained] = useState<{ id: number; pts: number } | null>(null);
+  const [score, setScore] = useState(0);
+  const [streak, setStreak] = useState(0);
+  const [bestStreak, setBestStreak] = useState(0);
+  const [interim, setInterim] = useState("");
+  const [typing, setTyping] = useState(!asrSupported());
+  const [typed, setTyped] = useState("");
+  const [peek, setPeek] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [autoAdvance, setAutoAdvance] = useState<number | null>(null);
+  const [speaking, setSpeaking] = useState(false);
+
+  const log = useRef<LogEntry[]>([]);
+  const attempts = useRef(0);
+  const run = useRef(0); // bumps on every card change so stale async work is ignored
+  const listening = useRef<Listening | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const requeued = useRef(new Set<string>());
+  const logged = useRef(new Set<string>()); // first attempt per card counts for stats
+
+  const card = queue[index];
+  const speaker: Character = useMemo(() => {
+    // Rotate through characters, never the same one twice in a row.
+    const offset = (index * 3 + card.itemId.length) % CHARACTERS.length;
+    return CHARACTERS[offset];
+  }, [index, card.itemId]);
+
+  const clearTimer = () => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = null;
+    setAutoAdvance(null);
+  };
+
+  const stopAll = useCallback(() => {
+    clearTimer();
+    stopSpeaking();
+    listening.current?.abort();
+    listening.current = null;
+  }, []);
+
+  useEffect(() => stopAll, [stopAll]);
+
+  // Timers fire after re-renders, so read the latest values through a ref.
+  const latest = useRef({ queue, index, score, bestStreak });
+  latest.current = { queue, index, score, bestStreak };
+
+  const next = useCallback(() => {
+    stopAll();
+    const { queue: q, index: i, score: sc, bestStreak: bs } = latest.current;
+    if (i + 1 >= q.length) return onFinish({ score: sc, bestStreak: bs, log: log.current });
+    setIndex(i + 1);
+  }, [stopAll, onFinish]);
+
+  // ------------------------------------------------------------- grading
+
+  const finalize = useCallback(
+    (r: GradeResult) => {
+      const myRun = run.current;
+      const first = attempts.current === 0;
+      attempts.current += 1;
+      const accepted = isAccepted(r.verdict);
+      const pts = first ? POINTS[r.verdict] : Math.ceil(POINTS[r.verdict] / 2);
+
+      setResult(r);
+      setPhase("feedback");
+      setScore((s) => s + pts);
+      setGained({ id: Date.now(), pts });
+      const newStreak = accepted ? streak + 1 : 0;
+      setStreak(newStreak);
+      setBestStreak((b) => Math.max(b, newStreak));
+      playVerdict(r.verdict, newStreak);
+      if (accepted && newStreak > 0 && newStreak % 5 === 0) setTimeout(playStreak, 350);
+
+      if (first && !logged.current.has(card.key)) {
+        logged.current.add(card.key);
+        log.current.push({ card, verdict: r.verdict, heard: r.heard });
+        onAttempt(card, r.verdict);
+        // Missed it? It comes back a few cards later in this session.
+        if (!accepted && !requeued.current.has(card.key)) {
+          requeued.current.add(card.key);
+          setQueue((q) => {
+            const copy = [...q];
+            copy.splice(Math.min(index + 4, copy.length), 0, card);
+            return copy;
+          });
+        }
+      }
+
+      const wait = ADVANCE_MS[r.verdict];
+      if (wait) {
+        setAutoAdvance(wait);
+        timer.current = setTimeout(() => {
+          if (run.current === myRun) next();
+        }, wait);
+      }
+    },
+    [card, index, streak, onAttempt, next],
+  );
+
+  const evaluate = useCallback(
+    async (alternatives: string[]) => {
+      const myRun = run.current;
+      if (alternatives.length === 0 || !alternatives.some((a) => a.trim())) {
+        setNotice("Didn't catch that — tap the mic and try again.");
+        setPhase("answer");
+        return;
+      }
+      // Recognisers return several guesses; grade them all and keep the kindest.
+      const graded = alternatives.map((a) => gradeLocally(lang, a, card.phrase, { kind: card.kind }));
+      let best = graded.sort((a, b) => RANK.indexOf(a.verdict) - RANK.indexOf(b.verdict))[0];
+
+      if (settings.aiEnabled && settings.aiKey && best.verdict !== "perfect") {
+        setPhase("checking");
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 9000);
+        try {
+          const { gradeWithAi } = await import("../lib/aiGrader");
+          const ai = await gradeWithAi({ apiKey: settings.aiKey, model: settings.aiModel }, lang, card.phrase, best.heard, ctrl.signal);
+          best = { ...best, ...ai, source: "ai" };
+        } catch (err) {
+          console.warn("AI grading failed, using local grade", err);
+        } finally {
+          clearTimeout(t);
+        }
+      }
+      if (run.current !== myRun) return;
+      finalize(best);
+    },
+    [lang, card, settings, finalize],
+  );
+
+  const startListening = useCallback(async () => {
+    if (!asrSupported()) return setTyping(true);
+    const myRun = run.current;
+    stopSpeaking();
+    setNotice(null);
+    setInterim("");
+    setPhase("listening");
+    playMicOn();
+    const l = listen(lang.speechTag, setInterim);
+    listening.current = l;
+    try {
+      const alts = await l.result;
+      if (run.current !== myRun || listening.current !== l) return;
+      listening.current = null;
+      playMicOff();
+      await evaluate(alts);
+    } catch (err) {
+      if (run.current !== myRun) return;
+      listening.current = null;
+      const msg = String((err as Error).message);
+      if (msg.includes("not-allowed") || msg.includes("service-not-allowed")) {
+        setNotice("Microphone blocked — allow mic access, or type your answer.");
+        setTyping(true);
+      } else {
+        setNotice(`Mic hiccup (${msg}). Try again or type.`);
+      }
+      setPhase("answer");
+    }
+  }, [lang, evaluate]);
+
+  const stopListening = () => listening.current?.stop();
+
+  // ------------------------------------------------------------- per card
+
+  const playPhrase = useCallback(
+    async (rate = 1) => {
+      setSpeaking(true);
+      await speak(card.phrase.text, lang.speechTag, speaker, { rate: settings.speechRate * rate });
+      setSpeaking(false);
+    },
+    [card, lang, speaker, settings.speechRate],
+  );
+
+  useEffect(() => {
+    const myRun = ++run.current;
+    attempts.current = 0;
+    setResult(null);
+    setPhase("intro");
+    setShowTranslation(false);
+    setInterim("");
+    setTyped("");
+    setPeek(false);
+    setNotice(null);
+    (async () => {
+      await playPhrase();
+      if (run.current !== myRun) return;
+      setShowTranslation(true);
+      setPhase("answer");
+      if (settings.autoMic && !typing && asrSupported()) {
+        await new Promise((r) => setTimeout(r, 250));
+        if (run.current === myRun) void startListening();
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [index]);
+
+  const skip = () => {
+    stopAll();
+    if (attempts.current === 0 && !logged.current.has(card.key)) {
+      logged.current.add(card.key);
+      log.current.push({ card, verdict: "skipped", heard: "" });
+      onAttempt(card, "skipped");
+    }
+    playVerdict("skipped");
+    next();
+  };
+
+  const retry = () => {
+    clearTimer();
+    setResult(null);
+    setPhase("answer");
+    if (!typing) void startListening();
+  };
+
+  const submitTyped = () => {
+    if (!typed.trim()) return;
+    void evaluate([typed]);
+  };
+
+  // ------------------------------------------------------------- keyboard
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const inInput = (e.target as HTMLElement)?.tagName === "INPUT";
+      if (e.key === "Escape") return onExit();
+      if (inInput) return;
+      if (e.key === " ") {
+        e.preventDefault();
+        if (phase === "listening") stopListening();
+        else if (phase === "answer" || phase === "intro") void startListening();
+        else if (phase === "feedback") next();
+      } else if (e.key === "Enter") {
+        if (phase === "feedback") next();
+      } else if (e.key.toLowerCase() === "r") void playPhrase();
+      else if (e.key.toLowerCase() === "s") skip();
+      else if (e.key.toLowerCase() === "t") setTyping((t) => !t);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
+  // ------------------------------------------------------------- render
+
+  const progress = (index + (phase === "feedback" ? 1 : 0)) / queue.length;
+  const ui = result ? VERDICT_UI[result.verdict] : null;
+  const mood: Mood =
+    phase === "listening" ? "listening" : phase === "checking" ? "thinking" : ui ? ui.mood : speaking ? "happy" : "idle";
+  const hideText = settings.hideTextWhileSpeaking && (phase === "answer" || phase === "listening") && !peek;
+  const accepted = result && isAccepted(result.verdict);
+
+  return (
+    <div className="session">
+      <header className="session-top">
+        <button className="icon-btn" onClick={onExit} aria-label="Exit session">
+          ✕
+        </button>
+        <div className="progress">
+          <div className="progress-fill" style={{ width: `${progress * 100}%` }} />
+        </div>
+        <div className="score" key={score}>
+          {streak >= 3 && <span className="streak">🔥{streak}</span>}
+          <span className="score-num">{score}</span>
+          {gained && gained.pts > 0 && (
+            <span key={gained.id} className="score-pop">
+              +{gained.pts}
+            </span>
+          )}
+        </div>
+      </header>
+
+      <main className="stage">
+        <div className="speaker-row">
+          <div className={`speaker ${speaking ? "talking" : ""}`} style={{ background: speaker.color }}>
+            <span>{speaker.emoji}</span>
+          </div>
+          <div className="speaker-meta">
+            <div className="speaker-name">{speaker.name}</div>
+            <div className={`card-kind ${card.kind}`}>{card.kind === "word" ? "✨ New word" : "🧩 Use it"}</div>
+          </div>
+          <Mascot mood={mood} size={64} />
+        </div>
+
+        <button className={`phrase-card ${hideText ? "hidden-text" : ""}`} onClick={() => (hideText ? setPeek(true) : void playPhrase())}>
+          <div className="phrase-text" lang={lang.speechTag}>
+            {card.kind === "sentence" ? <Highlight text={card.phrase.text} focus={card.focusWord} lang={lang} /> : card.phrase.text}
+          </div>
+          {lang.hasRomanization && card.phrase.romanization && <div className="phrase-roman">{card.phrase.romanization}</div>}
+          <div className={`phrase-translation ${showTranslation ? "shown" : ""}`}>{card.phrase.translation}</div>
+          {hideText && <div className="peek-hint">tap to peek</div>}
+        </button>
+
+        {phase !== "feedback" && (
+          <div className="answer-zone">
+            {phase === "intro" && <div className="hint">Listen…</div>}
+            {(phase === "answer" || phase === "listening") && <div className="hint">{phase === "listening" ? "Listening… say it!" : "Your turn — say it!"}</div>}
+            {phase === "checking" && <div className="hint">Checking…</div>}
+            {interim && <div className="interim">“{interim}”</div>}
+            {notice && <div className="notice">{notice}</div>}
+
+            {typing ? (
+              <form
+                className="type-row"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  submitTyped();
+                }}
+              >
+                <input
+                  autoFocus
+                  lang={lang.speechTag}
+                  value={typed}
+                  onChange={(e) => setTyped(e.target.value)}
+                  placeholder={`Type in ${lang.name}…`}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                />
+                <button type="submit" className="btn primary" disabled={!typed.trim() || phase === "checking"}>
+                  ✓
+                </button>
+              </form>
+            ) : (
+              <button
+                className={`mic ${phase === "listening" ? "on" : ""}`}
+                onClick={() => (phase === "listening" ? stopListening() : void startListening())}
+                disabled={phase === "checking"}
+                aria-label={phase === "listening" ? "Stop listening" : "Start speaking"}
+              >
+                {phase === "checking" ? <span className="spinner" /> : "🎙️"}
+              </button>
+            )}
+          </div>
+        )}
+
+        {phase === "feedback" && result && ui && (
+          <div className={`feedback v-${result.verdict}`} onClick={() => accepted && next()}>
+            <div className="fb-head">
+              <span className="fb-emoji">{ui.emoji}</span>
+              <span className="fb-title">{ui.title}</span>
+              {result.source === "ai" && <span className="badge">AI</span>}
+            </div>
+            {result.heard && (
+              <div className="fb-line">
+                <span className="fb-label">You said</span>
+                <span lang={lang.speechTag}>{result.heard}</span>
+              </div>
+            )}
+
+            {result.verdict === "unnatural" && (
+              <div className="fb-line big">
+                <span className="fb-label">Natives say</span>
+                <span lang={lang.speechTag}>{result.better ?? result.expected}</span>
+              </div>
+            )}
+            {result.verdict === "alternative" && (
+              <div className="fb-line">
+                <span className="fb-label">Expected</span>
+                <span lang={lang.speechTag}>{result.expected}</span>
+              </div>
+            )}
+            {(result.verdict === "close" || result.verdict === "wrong") && (
+              <>
+                <div className="fb-line big">
+                  <span className="fb-label">Target</span>
+                  <span lang={lang.speechTag} className="marks">
+                    {result.marks?.map((m, i) => (
+                      <span key={i} className={m.hit ? "" : "miss"}>
+                        {m.token}
+                        {lang.tokenJoiner}
+                      </span>
+                    )) ?? result.expected}
+                  </span>
+                </div>
+                {result.better && result.better !== result.expected && (
+                  <div className="fb-line">
+                    <span className="fb-label">Your version, fixed</span>
+                    <span lang={lang.speechTag}>{result.better}</span>
+                  </div>
+                )}
+              </>
+            )}
+            {result.note && <div className="fb-note">{result.note}</div>}
+
+            {autoAdvance ? (
+              <div className="auto-bar" style={{ animationDuration: `${autoAdvance}ms` }} />
+            ) : null}
+
+            <div className="fb-actions" onClick={(e) => e.stopPropagation()}>
+              {!accepted && (
+                <button className="btn" onClick={retry}>
+                  ↻ Try again
+                </button>
+              )}
+              {autoAdvance && (
+                <button className="btn ghost" onClick={clearTimer}>
+                  ⏸ Stay
+                </button>
+              )}
+              <button className="btn primary" onClick={next}>
+                Next ⏎
+              </button>
+            </div>
+          </div>
+        )}
+      </main>
+
+      <footer className="tools">
+        <button className="tool" onClick={() => void playPhrase()} aria-label="Replay">
+          🔊<span>Replay</span>
+        </button>
+        <button className="tool" onClick={() => void playPhrase(0.65)} aria-label="Replay slowly">
+          🐢<span>Slow</span>
+        </button>
+        <button className="tool" onClick={() => setTyping((t) => !t)} aria-label="Toggle typing">
+          {typing ? "🎙️" : "⌨️"}
+          <span>{typing ? "Speak" : "Type"}</span>
+        </button>
+        <button className="tool" onClick={skip} aria-label="Skip">
+          ⏭<span>Skip</span>
+        </button>
+      </footer>
+    </div>
+  );
+}

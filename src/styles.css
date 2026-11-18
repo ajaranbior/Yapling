@@ -263,3 +263,4 @@ mark { background: color-mix(in srgb, var(--accent2) 35%, transparent); color: i
 .masked { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 1.15rem; letter-spacing: 0.06em; color: var(--accent2); word-break: break-word; }
 .hint-badge { background: var(--meh); color: #1b1530; }
 .hint-badge + .badge { margin-left: 4px; }
+.speech-log { font-size: 0.7rem; line-height: 1.35; white-space: pre-wrap; word-break: break-word; background: var(--bg2); color: var(--muted); padding: 8px 10px; border-radius: 10px; max-height: 220px; overflow: auto; cursor: copy; }

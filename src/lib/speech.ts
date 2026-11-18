@@ -73,6 +73,14 @@ export interface SpeakOptions {
   onHalf?: () => void;
 }
 
+/** Recent speech events, newest last: shown by Settings → Test voice to diagnose missing audio. */
+export const speechLog: string[] = [];
+function logSpeech(msg: string) {
+  const t = new Date().toISOString().slice(14, 23);
+  speechLog.push(`${t} ${msg}`);
+  if (speechLog.length > 40) speechLog.shift();
+}
+
 // Chrome garbage-collects utterances that nothing references, and then never fires their events.
 let current: SpeechSynthesisUtterance | null = null;
 let speakId = 0;
@@ -91,6 +99,7 @@ const START_TIMEOUT_MS = 2500;
 export async function speak(text: string, tag: string, character: Character, opts: SpeakOptions = {}): Promise<void> {
   if (!synth) return;
   const id = ++speakId;
+  logSpeech(`speak "${text.slice(0, 24)}" ${tag} · speaking=${synth.speaking} pending=${synth.pending} paused=${synth.paused} · ${loadVoices().length} voices`);
   if (synth.speaking || synth.pending) {
     synth.cancel();
     await sleepMs(60);
@@ -125,6 +134,7 @@ function speakOnce(
     u.pitch = character.pitch;
     u.rate = character.rate * (opts.rate ?? 1);
     u.volume = 1;
+    logSpeech(`  try voice: ${voice ? `${voice.name} [${voice.lang}]${voice.localService ? "" : " online"}` : "(browser default)"}`);
     let started = false;
     let done = false;
     let halfDone = !opts.onHalf;
@@ -146,8 +156,12 @@ function speakOnce(
       resolve(ok);
     };
     // A superseded call (another speak() or stopSpeaking()) counts as played: nothing to retry.
-    const startTimer = setTimeout(() => finish(id !== speakId || started), START_TIMEOUT_MS);
+    const startTimer = setTimeout(() => {
+      if (!started) logSpeech(`  no start after ${START_TIMEOUT_MS}ms (speaking=${synth.speaking} pending=${synth.pending})`);
+      finish(id !== speakId || started);
+    }, START_TIMEOUT_MS);
     u.onstart = () => {
+      logSpeech("  start");
       started = true;
       clearTimeout(startTimer);
       endTimer = setTimeout(() => finish(true), 1500 + (Array.from(text).length * 180) / (opts.rate ?? 1));
@@ -159,8 +173,12 @@ function speakOnce(
         if (e.charIndex >= text.length * 0.5) half();
       };
     }
-    u.onend = () => finish(true);
+    u.onend = () => {
+      logSpeech("  end");
+      finish(true);
+    };
     u.onerror = (e) => {
+      logSpeech(`  error: ${e.error}`);
       // "interrupted"/"canceled" = we stopped it on purpose; anything else before audio started means try another voice.
       const intentional = e.error === "interrupted" || e.error === "canceled";
       finish(started || intentional || id !== speakId);

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Home } from "./components/Home";
+import { Onboarding } from "./components/Onboarding";
 import { SessionView, type SessionResult } from "./components/SessionView";
 import { SettingsSheet } from "./components/SettingsSheet";
 import { Summary } from "./components/Summary";
@@ -24,6 +25,7 @@ import type { Card, Verdict } from "./lib/types";
 
 type Screen =
   | { name: "home" }
+  | { name: "onboarding" }
   | { name: "trouble" }
   | { name: "session"; deck: Card[]; id: number }
   | { name: "summary"; result: SessionResult; isNewBest: boolean };
@@ -32,7 +34,7 @@ export default function App() {
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [stats, setStats] = useState<Stats>(loadStats);
   const [best, setBest] = useState<Record<string, number>>(loadBest);
-  const [screen, setScreen] = useState<Screen>({ name: "home" });
+  const [screen, setScreen] = useState<Screen>(() => (settings.onboarded ? { name: "home" } : { name: "onboarding" }));
   const [showSettings, setShowSettings] = useState(false);
 
   const lang = getLanguage(settings.lang);
@@ -52,7 +54,14 @@ export default function App() {
     setScreen({ name: "session", deck, id: Date.now() });
   };
 
-  const startLearn = () => startDeck(buildLearnDeck(lang, settings.topics[lang.code] ?? [], settings.sessionSize, stats));
+  const startLearn = () =>
+    startDeck(
+      buildLearnDeck(
+        lang,
+        { topicIds: settings.topics[lang.code] ?? [], size: settings.sessionSize, level: settings.level, interests: settings.interests },
+        stats,
+      ),
+    );
 
   const onAttempt = useCallback(
     (card: Card, verdict: Verdict) => setStats((s) => recordAttempt(s, lang.code, card, verdict)),
@@ -75,6 +84,15 @@ export default function App() {
 
   return (
     <div className="app">
+      {screen.name === "onboarding" && (
+        <Onboarding
+          settings={settings}
+          onDone={(patch) => {
+            update(patch);
+            setScreen({ name: "home" });
+          }}
+        />
+      )}
       {screen.name === "home" && (
         <Home
           lang={lang}
@@ -84,6 +102,7 @@ export default function App() {
           update={update}
           onStart={startLearn}
           onTrouble={() => setScreen({ name: "trouble" })}
+          onEditProfile={() => setScreen({ name: "onboarding" })}
           onSettings={() => setShowSettings(true)}
         />
       )}

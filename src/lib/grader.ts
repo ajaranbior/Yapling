@@ -218,3 +218,43 @@ export function gradeLocally(lang: LanguageConfig, heardRaw: string, phrase: Phr
   if (best.f >= CLOSE_THRESHOLD) return result("close", { better: expected, note: "Close! Compare with the sentence below." });
   return result("wrong", { better: expected });
 }
+
+// ---------------------------------------------------------------- talking over the voice
+
+const isEchoOf = (head: string[], tail: string[]) => head.length === tail.length && head.every((t, i) => tokenSimilarity(t, tail[i]) >= 0.8);
+
+/**
+ * When the mic opens while the voice is still speaking, the transcript can start with
+ * the end of the voice's own sentence ("…za pomoc" + "dziękuję bardzo za pomoc").
+ * Returns the transcript with each plausible echo prefix removed, so the learner's
+ * part can be graded on its own.
+ */
+export function stripEcho(lang: LanguageConfig, heard: string, expectedText: string): string[] {
+  const H = lang.tokenize(lang.normalize(heard));
+  const E = lang.tokenize(lang.normalize(expectedText));
+  const out: string[] = [];
+  for (let k = 1; k < H.length && k <= E.length; k++) {
+    if (isEchoOf(H.slice(0, k), E.slice(E.length - k))) out.push(H.slice(k).join(lang.tokenJoiner));
+  }
+  return out;
+}
+
+/** True when everything heard is just the tail end of the voice (the learner hasn't spoken yet). */
+export function isOnlyEcho(lang: LanguageConfig, heard: string, expectedText: string): boolean {
+  const H = lang.tokenize(lang.normalize(heard));
+  const E = lang.tokenize(lang.normalize(expectedText));
+  return H.length > 0 && H.length < E.length && isEchoOf(H, E.slice(E.length - H.length));
+}
+
+/** Learner-facing hint that shows the shape of the answer without giving it away: "D_______ b_____ z_ p_____". */
+export function maskWords(text: string): string {
+  return text
+    .split(/(\s+)/)
+    .map((w) => {
+      const letters = Array.from(w);
+      const first = letters.findIndex((c) => /\p{L}/u.test(c));
+      if (first === -1) return w;
+      return letters.map((c, i) => (i === first || !/\p{L}/u.test(c) ? c : "_")).join("");
+    })
+    .join("");
+}

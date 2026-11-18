@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { gradeLocally, isAccepted, POINTS } from "../lib/grader";
+import { gradeLocally, isAccepted, isOnlyEcho, maskWords, POINTS, stripEcho } from "../lib/grader";
 import type { LanguageConfig } from "../lib/languages/types";
 import { playMicOff, playMicOn, playStreak, playVerdict } from "../lib/sounds";
-import { asrSupported, CHARACTERS, listen, speak, stopSpeaking, type Character, type Listening } from "../lib/speech";
+import { asrSupported, CHARACTERS, estimateSpeechMs, listen, speak, stopSpeaking, type Character, type Listening } from "../lib/speech";
 import type { Settings } from "../lib/storage";
 import type { Card, GradeResult, Verdict } from "../lib/types";
 import { Highlight } from "./Highlight";
@@ -33,7 +33,16 @@ const VERDICT_UI: Record<Verdict, { emoji: string; title: string; mood: Mood }> 
   skipped: { emoji: "⏭", title: "Skipped", mood: "idle" },
 };
 
-const ADVANCE_MS: Partial<Record<Verdict, number>> = { perfect: 1100, alternative: 2600, unnatural: 3600 };
+/** How long accepted answers stay on screen before moving on (after the answer audio, in translate mode). */
+const ADVANCE_MS: Partial<Record<Verdict, number>> = { perfect: 650, alternative: 1500, unnatural: 2600 };
+
+/** Points multiplier when you used a hint (1) or revealed the answer (2). */
+const HINT_MULT = [1, 0.6, 0.3];
+
+/** Phrases shorter than this (spoken ms) are too short to talk over: the mic opens after the voice. */
+const EARLY_MIC_MIN_MS = 1300;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export function SessionView({
   lang,
@@ -63,6 +72,7 @@ export function SessionView({
   const [typing, setTyping] = useState(!asrSupported());
   const [typed, setTyped] = useState("");
   const [peek, setPeek] = useState(false);
+  const [hint, setHint] = useState(0); // 0 = none, 1 = first letters, 2 = answer revealed
   const [notice, setNotice] = useState<string | null>(null);
   const [autoAdvance, setAutoAdvance] = useState<number | null>(null);
   const [speaking, setSpeaking] = useState(false);
@@ -72,10 +82,16 @@ export function SessionView({
   const run = useRef(0); // bumps on every card change so stale async work is ignored
   const listening = useRef<Listening | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stayed = useRef(false);
   const requeued = useRef(new Set<string>());
   const logged = useRef(new Set<string>()); // first attempt per card counts for stats
 
   const card = queue[index];
+  /** Translate mode: you see the meaning and say it in the target language. New words are still shown first. */
+  const prompted = settings.practiceMode === "translate" && !card.intro;
+  const revealed = !prompted || hint >= 2 || phase === "feedback";
+  const autoMic = settings.autoMic && !typing && asrSupported();
+
   const speaker: Character = useMemo(() => {
     // Rotate through characters, never the same one twice in a row.
     const offset = (index * 3 + card.itemId.length) % CHARACTERS.length;
@@ -108,6 +124,22 @@ export function SessionView({
     setIndex(i + 1);
   }, [stopAll, onFinish]);
 
+  const back = useCallback(() => {
+    const i = latest.current.index;
+    if (i === 0) return;
+    stopAll();
+    setIndex(i - 1);
+  }, [stopAll]);
+
+  const playPhrase = useCallback(
+    async (rate = 1, onHalf?: () => void) => {
+      setSpeaking(true);
+      await speak(card.phrase.text, lang.speechTag, speaker, { rate: settings.speechRate * rate, onHalf });
+      setSpeaking(false);
+    },
+    [card, lang, speaker, settings.speechRate],
+  );
+
   // ------------------------------------------------------------- grading
 
   const finalize = useCallback(
@@ -116,7 +148,7 @@ export function SessionView({
       const first = attempts.current === 0;
       attempts.current += 1;
       const accepted = isAccepted(r.verdict);
-      const pts = first ? POINTS[r.verdict] : Math.ceil(POINTS[r.verdict] / 2);
+      const pts = first ? Math.ceil(POINTS[r.verdict] * HINT_MULT[prompted ? hint : 0]) : Math.ceil(POINTS[r.verdict] / 2);
 
       setResult(r);
       setPhase("feedback");
@@ -130,10 +162,12 @@ export function SessionView({
 
       if (first && !logged.current.has(card.key)) {
         logged.current.add(card.key);
-        log.current.push({ card, verdict: r.verdict, heard: r.heard });
-        onAttempt(card, r.verdict);
+        // Peeking at the answer means it isn't really known yet: keep it in trouble spots.
+        const statVerdict: Verdict = prompted && hint >= 2 && accepted ? "close" : r.verdict;
+        log.current.push({ card, verdict: statVerdict, heard: r.heard });
+        onAttempt(card, statVerdict);
         // Missed it? It comes back a few cards later in this session.
-        if (!accepted && !requeued.current.has(card.key)) {
+        if (!isAccepted(statVerdict) && !requeued.current.has(card.key)) {
           requeued.current.add(card.key);
           setQueue((q) => {
             const copy = [...q];
@@ -144,24 +178,38 @@ export function SessionView({
       }
 
       const wait = ADVANCE_MS[r.verdict];
-      if (wait) {
+      const scheduleAdvance = () => {
+        if (!wait || run.current !== myRun || stayed.current) return;
         setAutoAdvance(wait);
         timer.current = setTimeout(() => {
           if (run.current === myRun) next();
         }, wait);
-      }
+      };
+      // In translate mode, let them hear how it's said (unless they nailed it — keep the pace up).
+      if (prompted && r.verdict !== "perfect") {
+        void (async () => {
+          await sleep(250);
+          if (run.current !== myRun) return;
+          await playPhrase();
+          scheduleAdvance();
+        })();
+      } else scheduleAdvance();
     },
-    [card, index, streak, onAttempt, next],
+    [card, index, streak, hint, prompted, onAttempt, next, playPhrase],
   );
 
   const evaluate = useCallback(
-    async (alternatives: string[]) => {
+    async (raw: string[], overlapped: boolean) => {
       const myRun = run.current;
-      if (alternatives.length === 0 || !alternatives.some((a) => a.trim())) {
+      let alternatives = raw.filter((a) => a.trim());
+      if (alternatives.length === 0) {
         setNotice("Didn't catch that — tap the mic and try again.");
         setPhase("answer");
         return;
       }
+      // Mic was open while the voice talked: also grade the transcript with the voice's echo cut off.
+      if (overlapped) alternatives = [...alternatives, ...alternatives.flatMap((a) => stripEcho(lang, a, card.phrase.text))];
+
       // Recognisers return several guesses; grade them all and keep the kindest.
       const graded = alternatives.map((a) => gradeLocally(lang, a, card.phrase, { kind: card.kind }));
       let best = graded.sort((a, b) => RANK.indexOf(a.verdict) - RANK.indexOf(b.verdict))[0];
@@ -172,7 +220,8 @@ export function SessionView({
         const t = setTimeout(() => ctrl.abort(), 9000);
         try {
           const { gradeWithAi } = await import("../lib/aiGrader");
-          const ai = await gradeWithAi({ apiKey: settings.aiKey, model: settings.aiModel }, lang, card.phrase, best.heard, ctrl.signal);
+          const mode = prompted ? "translate" : "repeat";
+          const ai = await gradeWithAi({ apiKey: settings.aiKey, model: settings.aiModel }, lang, card.phrase, best.heard, mode, ctrl.signal);
           best = { ...best, ...ai, source: "ai" };
         } catch (err) {
           console.warn("AI grading failed, using local grade", err);
@@ -183,74 +232,122 @@ export function SessionView({
       if (run.current !== myRun) return;
       finalize(best);
     },
-    [lang, card, settings, finalize],
+    [lang, card, settings, prompted, finalize],
   );
 
-  const startListening = useCallback(async () => {
-    if (!asrSupported()) return setTyping(true);
-    const myRun = run.current;
-    stopSpeaking();
-    setNotice(null);
-    setInterim("");
-    setPhase("listening");
-    playMicOn();
-    const l = listen(lang.speechTag, setInterim);
-    listening.current = l;
-    try {
-      const alts = await l.result;
-      if (run.current !== myRun || listening.current !== l) return;
-      listening.current = null;
-      playMicOff();
-      await evaluate(alts);
-    } catch (err) {
-      if (run.current !== myRun) return;
-      listening.current = null;
-      const msg = String((err as Error).message);
-      if (msg.includes("not-allowed") || msg.includes("service-not-allowed")) {
-        setNotice("Microphone blocked — allow mic access, or type your answer.");
-        setTyping(true);
-      } else {
-        setNotice(`Mic hiccup (${msg}). Try again or type.`);
+  /**
+   * `overlap`: the voice is still talking. Listen continuously and hold the turn open until
+   * the voice is done (the caller calls `release()`), so you can start speaking early.
+   */
+  const startListening = useCallback(
+    async (opts: { overlap?: boolean } = {}) => {
+      if (!asrSupported()) return setTyping(true);
+      const overlap = !!opts.overlap;
+      const myRun = run.current;
+      listening.current?.abort();
+      if (!overlap) stopSpeaking();
+      setNotice(null);
+      setInterim("");
+      setPhase("listening");
+      if (!overlap) playMicOn(); // a beep mid-sentence would only confuse the recogniser
+      const l = listen(lang.speechTag, { onInterim: setInterim, continuous: overlap, hold: overlap });
+      listening.current = l;
+      try {
+        const alts = await l.result;
+        if (run.current !== myRun || listening.current !== l) return;
+        listening.current = null;
+        // Only the tail of the voice was heard: the learner hasn't answered yet, so keep listening.
+        if (overlap && alts.length > 0 && alts.every((a) => isOnlyEcho(lang, a, card.phrase.text))) {
+          void startListening();
+          return;
+        }
+        playMicOff();
+        await evaluate(alts, overlap);
+      } catch (err) {
+        if (run.current !== myRun) return;
+        listening.current = null;
+        const msg = String((err as Error).message);
+        if (msg.includes("not-allowed") || msg.includes("service-not-allowed")) {
+          setNotice("Microphone blocked — allow mic access, or type your answer.");
+          setTyping(true);
+        } else {
+          setNotice(`Mic hiccup (${msg}). Try again or type.`);
+        }
+        setPhase("answer");
       }
-      setPhase("answer");
-    }
-  }, [lang, evaluate]);
+    },
+    [lang, card, evaluate],
+  );
 
   const stopListening = () => listening.current?.stop();
 
   // ------------------------------------------------------------- per card
 
-  const playPhrase = useCallback(
-    async (rate = 1) => {
-      setSpeaking(true);
-      await speak(card.phrase.text, lang.speechTag, speaker, { rate: settings.speechRate * rate });
-      setSpeaking(false);
-    },
-    [card, lang, speaker, settings.speechRate],
-  );
-
   useEffect(() => {
     const myRun = ++run.current;
     attempts.current = 0;
+    stayed.current = false;
     setResult(null);
     setPhase("intro");
     setShowTranslation(false);
     setInterim("");
     setTyped("");
     setPeek(false);
+    setHint(0);
     setNotice(null);
     (async () => {
-      await playPhrase();
+      if (prompted) {
+        // Nothing to listen to first: straight to your turn.
+        setShowTranslation(true);
+        setPhase("answer");
+        if (autoMic) {
+          await sleep(120);
+          if (run.current === myRun) void startListening();
+        }
+        return;
+      }
+      const early = autoMic && settings.earlyMic && estimateSpeechMs(card.phrase.text) >= EARLY_MIC_MIN_MS;
+      let opened = false;
+      await playPhrase(
+        1,
+        early
+          ? () => {
+              if (run.current !== myRun) return;
+              opened = true;
+              void startListening({ overlap: true });
+            }
+          : undefined,
+      );
       if (run.current !== myRun) return;
       setShowTranslation(true);
-      setPhase("answer");
-      if (settings.autoMic && !typing && asrSupported()) {
-        await new Promise((r) => setTimeout(r, 250));
-        if (run.current === myRun) void startListening();
+      if (opened) {
+        listening.current?.release();
+        return;
       }
+      setPhase("answer");
+      if (autoMic) void startListening();
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [index]);
+
+  /** Replay the phrase (stops the mic first so it doesn't hear the voice), then listen again. */
+  const replay = async (rate = 1) => {
+    const myRun = run.current;
+    const wasAnswering = phase === "answer" || phase === "listening" || phase === "intro";
+    listening.current?.abort();
+    listening.current = null;
+    if (wasAnswering) setPhase("answer");
+    await playPhrase(rate);
+    if (run.current === myRun && wasAnswering && autoMic) void startListening();
+  };
+
+  const showHint = () => {
+    if (hint === 0) setHint(1);
+    else {
+      setHint(2);
+      void replay();
+    }
+  };
 
   const skip = () => {
     stopAll();
@@ -263,16 +360,25 @@ export function SessionView({
     next();
   };
 
+  const stay = () => {
+    stayed.current = true;
+    clearTimer();
+  };
+
   const retry = () => {
     clearTimer();
+    stopSpeaking();
     setResult(null);
+    setHint(2); // they've seen the answer now
     setPhase("answer");
     if (!typing) void startListening();
   };
 
   const submitTyped = () => {
     if (!typed.trim()) return;
-    void evaluate([typed]);
+    listening.current?.abort();
+    listening.current = null;
+    void evaluate([typed], false);
   };
 
   // ------------------------------------------------------------- keyboard
@@ -282,6 +388,7 @@ export function SessionView({
       const inInput = (e.target as HTMLElement)?.tagName === "INPUT";
       if (e.key === "Escape") return onExit();
       if (inInput) return;
+      const k = e.key.toLowerCase();
       if (e.key === " ") {
         e.preventDefault();
         if (phase === "listening") stopListening();
@@ -289,9 +396,12 @@ export function SessionView({
         else if (phase === "feedback") next();
       } else if (e.key === "Enter") {
         if (phase === "feedback") next();
-      } else if (e.key.toLowerCase() === "r") void playPhrase();
-      else if (e.key.toLowerCase() === "s") skip();
-      else if (e.key.toLowerCase() === "t") setTyping((t) => !t);
+      } else if (e.key === "ArrowLeft") back();
+      else if (e.key === "ArrowRight") phase === "feedback" ? next() : skip();
+      else if (k === "r") void replay();
+      else if (k === "h" && prompted && !revealed) showHint();
+      else if (k === "s") skip();
+      else if (k === "t") setTyping((t) => !t);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -303,8 +413,16 @@ export function SessionView({
   const ui = result ? VERDICT_UI[result.verdict] : null;
   const mood: Mood =
     phase === "listening" ? "listening" : phase === "checking" ? "thinking" : ui ? ui.mood : speaking ? "happy" : "idle";
-  const hideText = settings.hideTextWhileSpeaking && (phase === "answer" || phase === "listening") && !peek;
+  const hideText = !prompted && settings.hideTextWhileSpeaking && (phase === "answer" || phase === "listening") && !peek;
   const accepted = result && isAccepted(result.verdict);
+  const hintText = lang.hasRomanization && card.phrase.romanization ? maskWords(card.phrase.romanization) : maskWords(card.phrase.text);
+  const kindLabel = card.kind === "word" ? (card.intro ? "✨ New word" : "🔁 Word") : prompted ? "🧠 Say it" : "🧩 Use it";
+
+  const onCardTap = () => {
+    if (prompted && !revealed) showHint();
+    else if (hideText) setPeek(true);
+    else void replay();
+  };
 
   return (
     <div className="session">
@@ -333,26 +451,48 @@ export function SessionView({
           </div>
           <div className="speaker-meta">
             <div className="speaker-name">{speaker.name}</div>
-            <div className={`card-kind ${card.kind}`}>{card.kind === "word" ? "✨ New word" : "🧩 Use it"}</div>
+            <div className={`card-kind ${card.kind}`}>{kindLabel}</div>
           </div>
           <Mascot mood={mood} size={64} />
         </div>
 
-        <button className={`phrase-card ${hideText ? "hidden-text" : ""}`} onClick={() => (hideText ? setPeek(true) : void playPhrase())}>
-          <div className="phrase-text" lang={lang.speechTag}>
-            {card.kind === "sentence" ? <Highlight text={card.phrase.text} focus={card.focusWord} lang={lang} /> : card.phrase.text}
-          </div>
-          {lang.hasRomanization && card.phrase.romanization && <div className="phrase-roman">{card.phrase.romanization}</div>}
-          <div className={`phrase-translation ${showTranslation ? "shown" : ""}`}>{card.phrase.translation}</div>
-          {hideText && <div className="peek-hint">tap to peek</div>}
+        <button key={index} className={`phrase-card ${hideText ? "hidden-text" : ""}`} onClick={onCardTap}>
+          {!revealed ? (
+            <>
+              <div className="prompt-label">Say it in {lang.name}</div>
+              <div className="phrase-text prompt">{card.phrase.translation}</div>
+              {card.kind === "sentence" && card.focusWord && (
+                <div className="focus-chip">
+                  uses <b lang={lang.speechTag}>{card.focusWord}</b>
+                </div>
+              )}
+              {hint === 1 ? (
+                <div className="masked" lang={lang.speechTag}>
+                  {hintText}
+                </div>
+              ) : (
+                <div className="peek-hint">tap for a hint</div>
+              )}
+            </>
+          ) : (
+            <>
+              <div className="phrase-text" lang={lang.speechTag}>
+                {card.kind === "sentence" ? <Highlight text={card.phrase.text} focus={card.focusWord} lang={lang} /> : card.phrase.text}
+              </div>
+              {lang.hasRomanization && card.phrase.romanization && <div className="phrase-roman">{card.phrase.romanization}</div>}
+              <div className={`phrase-translation ${showTranslation || prompted ? "shown" : ""}`}>{card.phrase.translation}</div>
+              {hideText && <div className="peek-hint">tap to peek</div>}
+            </>
+          )}
         </button>
 
         {phase !== "feedback" && (
           <div className="answer-zone">
             {phase === "intro" && <div className="hint">Listen…</div>}
-            {(phase === "answer" || phase === "listening") && <div className="hint">{phase === "listening" ? "Listening… say it!" : "Your turn — say it!"}</div>}
+            {phase === "answer" && <div className="hint">Your turn — say it!</div>}
+            {phase === "listening" && <div className="hint">{speaking ? "Listening — jump in whenever you're ready" : "Listening… say it!"}</div>}
             {phase === "checking" && <div className="hint">Checking…</div>}
-            {interim && <div className="interim">“{interim}”</div>}
+            {interim && !speaking && <div className="interim">“{interim}”</div>}
             {notice && <div className="notice">{notice}</div>}
 
             {typing ? (
@@ -395,6 +535,7 @@ export function SessionView({
             <div className="fb-head">
               <span className="fb-emoji">{ui.emoji}</span>
               <span className="fb-title">{ui.title}</span>
+              {prompted && hint > 0 && <span className="badge hint-badge">{hint === 1 ? "hint" : "peeked"}</span>}
               {result.source === "ai" && <span className="badge">AI</span>}
             </div>
             {result.heard && (
@@ -439,9 +580,7 @@ export function SessionView({
             )}
             {result.note && <div className="fb-note">{result.note}</div>}
 
-            {autoAdvance ? (
-              <div className="auto-bar" style={{ animationDuration: `${autoAdvance}ms` }} />
-            ) : null}
+            {autoAdvance ? <div className="auto-bar" style={{ animationDuration: `${autoAdvance}ms` }} /> : null}
 
             <div className="fb-actions" onClick={(e) => e.stopPropagation()}>
               {!accepted && (
@@ -449,8 +588,8 @@ export function SessionView({
                   ↻ Try again
                 </button>
               )}
-              {autoAdvance && (
-                <button className="btn ghost" onClick={clearTimer}>
+              {accepted && !stayed.current && ADVANCE_MS[result.verdict] && (
+                <button className="btn ghost" onClick={stay}>
                   ⏸ Stay
                 </button>
               )}
@@ -463,12 +602,35 @@ export function SessionView({
       </main>
 
       <footer className="tools">
-        <button className="tool" onClick={() => void playPhrase()} aria-label="Replay">
-          🔊<span>Replay</span>
+        <button className="tool" onClick={back} disabled={index === 0} aria-label="Previous card">
+          ◀<span>Back</span>
         </button>
-        <button className="tool" onClick={() => void playPhrase(0.65)} aria-label="Replay slowly">
-          🐢<span>Slow</span>
-        </button>
+        {!revealed ? (
+          <>
+            <button className="tool" onClick={showHint} aria-label="Hint">
+              💡<span>{hint === 0 ? "Hint" : "Show"}</span>
+            </button>
+            <button
+              className="tool"
+              onClick={() => {
+                setHint(2);
+                void replay();
+              }}
+              aria-label="Hear the answer"
+            >
+              🔊<span>Hear it</span>
+            </button>
+          </>
+        ) : (
+          <>
+            <button className="tool" onClick={() => void replay()} aria-label="Replay">
+              🔊<span>Replay</span>
+            </button>
+            <button className="tool" onClick={() => void replay(0.65)} aria-label="Replay slowly">
+              🐢<span>Slow</span>
+            </button>
+          </>
+        )}
         <button className="tool" onClick={() => setTyping((t) => !t)} aria-label="Toggle typing">
           {typing ? "🎙️" : "⌨️"}
           <span>{typing ? "Speak" : "Type"}</span>

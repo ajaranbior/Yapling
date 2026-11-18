@@ -192,7 +192,7 @@ mark { background: color-mix(in srgb, var(--accent2) 35%, transparent); color: i
 .auto-bar { height: 4px; background: var(--good); border-radius: 2px; transform-origin: left; animation: shrink linear forwards; }
 @keyframes shrink { from { transform: scaleX(1); } to { transform: scaleX(0); } }
 
-.tools { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.tools { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
 .tool { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 10px 0; border-radius: 14px; background: var(--bg2); font-size: 1.3rem; }
 .tool span { font-size: 0.72rem; color: var(--muted); }
 
@@ -237,3 +237,29 @@ mark { background: color-mix(in srgb, var(--accent2) 35%, transparent); color: i
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
 }
+
+/* ---------------------------------------------------------------- levels, onboarding, translate mode */
+.muted.small { font-size: 0.82rem; margin: 8px 2px 0; }
+.center { text-align: center; }
+.link-btn { color: var(--accent2); font-weight: 700; font-size: 0.9rem; margin-top: 10px; padding: 4px 2px; }
+.small-btn { padding: 8px 14px; font-size: 0.9rem; }
+.onboarding { display: flex; flex-direction: column; gap: 12px; }
+.step-dots { display: flex; justify-content: center; gap: 6px; }
+.step-dots span { width: 8px; height: 8px; border-radius: 50%; background: var(--line); }
+.step-dots span.on { background: var(--accent2); }
+.level-list { display: flex; flex-direction: column; gap: 10px; }
+.level-btn {
+  display: flex; align-items: center; gap: 14px; text-align: left; padding: 14px 16px; border-radius: var(--radius);
+  background: var(--card); border: 1px solid var(--line);
+}
+.level-btn .flag { font-size: 1.8rem; }
+.level-btn span:last-child { display: flex; flex-direction: column; gap: 2px; }
+.level-btn small { color: var(--muted); }
+.level-btn.active { border-color: var(--accent2); background: color-mix(in srgb, var(--accent) 25%, var(--card)); }
+.prompt-label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--accent2); font-weight: 800; }
+.phrase-text.prompt { font-size: clamp(1.3rem, 5.6vw, 1.8rem); }
+.focus-chip { align-self: center; font-size: 0.85rem; color: var(--muted); background: var(--bg2); border-radius: 999px; padding: 3px 12px; }
+.focus-chip b { color: var(--text); }
+.masked { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 1.15rem; letter-spacing: 0.06em; color: var(--accent2); word-break: break-word; }
+.hint-badge { background: var(--meh); color: #1b1530; }
+.hint-badge + .badge { margin-left: 4px; }

@@ -1,7 +1,18 @@
-import type { Card, CardStat, Verdict } from "./types";
+import type { Card, CardStat, Level, Verdict } from "./types";
+
+export type PracticeMode = "translate" | "repeat";
 
 export interface Settings {
   lang: string;
+  level: Level;
+  /** Interest ids picked in onboarding (lib/profile.ts). */
+  interests: string[];
+  /** Onboarding was finished or skipped. */
+  onboarded: boolean;
+  /** "translate": see the meaning, say it in the target language. "repeat": hear it, say it back. */
+  practiceMode: PracticeMode;
+  /** Open the mic halfway through the voice so you can talk over the end of it. */
+  earlyMic: boolean;
   topics: Record<string, string[]>;
   sessionSize: number;
   sound: boolean;
@@ -17,6 +28,11 @@ export interface Settings {
 
 export const DEFAULT_SETTINGS: Settings = {
   lang: "pl",
+  level: "beginner",
+  interests: [],
+  onboarded: false,
+  practiceMode: "translate",
+  earlyMic: true,
   topics: {},
   sessionSize: 12,
   sound: true,

@@ -1,3 +1,7 @@
+export type Level = "beginner" | "intermediate" | "advanced";
+export const LEVELS: Level[] = ["beginner", "intermediate", "advanced"];
+export const levelRank = (l: Level | undefined) => LEVELS.indexOf(l ?? "beginner");
+
 /** A single thing the learner hears and then says back (a word or a sentence). */
 export interface Phrase {
   /** Text in the target language, written the way a native speaker would. */
@@ -10,10 +14,14 @@ export interface Phrase {
   accept?: string[];
   /** Things a learner might say that are understandable but sound off, with a hint. */
   unnatural?: { text: string; note: string }[];
+  /** Difficulty of a sentence. Defaults to the item's level. */
+  level?: Level;
 }
 
 export interface ContentItem {
   id: string;
+  /** Level at which the word itself is introduced (default "beginner"). */
+  level?: Level;
   /** The new word introduced first. */
   word: Phrase;
   /** Sentences that use the word — the "emergent" step from word to usage. */
@@ -24,6 +32,8 @@ export interface Topic {
   id: string;
   name: string;
   emoji: string;
+  /** Interest ids (see lib/profile.ts) this topic serves; used to tailor sessions. */
+  interests: string[];
   items: ContentItem[];
 }
 
@@ -52,6 +62,8 @@ export interface Card {
   topicId: string;
   /** The word this card builds on (sentence cards show it as a hint). */
   focusWord?: string;
+  /** First time this word is shown: always played and repeated, even in translate mode. */
+  intro?: boolean;
 }
 
 export interface CardStat {

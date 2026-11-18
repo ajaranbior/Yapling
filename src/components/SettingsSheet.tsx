@@ -31,8 +31,14 @@ export function SettingsSheet({
           onChange={(v) => update({ autoMic: v })}
         />
         <Toggle
+          label="Talk over the voice"
+          hint="Mic opens halfway through the phrase, so you can start early. Turn off if the voice cuts out on your phone."
+          checked={settings.earlyMic}
+          onChange={(v) => update({ earlyMic: v })}
+        />
+        <Toggle
           label="Hide text while answering"
-          hint="Harder: answer from memory (tap to peek)"
+          hint="Repeat mode: answer from memory (tap to peek)"
           checked={settings.hideTextWhileSpeaking}
           onChange={(v) => update({ hideTextWhileSpeaking: v })}
         />

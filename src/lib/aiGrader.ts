@@ -12,7 +12,7 @@ const GradeSchema = z.object({
 });
 
 const SYSTEM = `You grade spoken answers in a fast-paced language-learning app.
-The learner heard a target sentence and tried to say it back. Their answer came from speech recognition, so ignore punctuation, capitalisation and obvious recognition slips (homophones, missing accents).
+Depending on the mode, the learner either heard the target sentence and said it back, or only saw its English meaning and had to say it in the target language themselves (so other wordings are more likely and fine). Their answer came from speech recognition, so ignore punctuation, capitalisation and obvious recognition slips (homophones, missing accents).
 The learner is allowed to diverge: different word order, synonyms or a different construction are fine as long as the meaning is the same.
 
 Verdicts:
@@ -44,6 +44,7 @@ export async function gradeWithAi(
   lang: LanguageConfig,
   phrase: Phrase,
   heard: string,
+  mode: "translate" | "repeat",
   signal?: AbortSignal,
 ): Promise<Pick<GradeResult, "verdict" | "better" | "note">> {
   const known = [
@@ -68,6 +69,7 @@ export async function gradeWithAi(
         {
           role: "user",
           content: `Language: ${lang.name}
+Mode: ${mode === "translate" ? "translate (learner only saw the English)" : "repeat (learner heard the target)"}
 Target (${phrase.translation}): ${phrase.text}
 ${known}
 Learner said: ${heard}`,

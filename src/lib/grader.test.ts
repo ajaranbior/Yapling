@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { gradeLocally } from "./grader";
+import { gradeLocally, isOnlyEcho, maskWords, stripEcho } from "./grader";
 import { polish } from "./languages/pl";
 import { mandarin } from "./languages/zh";
 import type { Phrase } from "./types";
@@ -78,5 +78,22 @@ describe("mandarin grading", () => {
   it("one wrong character is close", () => {
     const p = find(mandarin, "我在办公室工作。");
     expect(gradeLocally(mandarin, "我再办公室工作", p).verdict).toBe("close");
+  });
+});
+
+describe("talking over the voice", () => {
+  it("strips the voice's tail from the start of the transcript", () => {
+    const out = stripEcho(polish, "za pomoc dziękuję bardzo za pomoc", "Dziękuję bardzo za pomoc.");
+    expect(out).toContain("dziękuję bardzo za pomoc");
+  });
+  it("works for Mandarin characters", () => {
+    expect(stripEcho(mandarin, "的帮助谢谢你的帮助", "谢谢你的帮助。")).toContain("谢谢你的帮助");
+  });
+  it("detects a transcript that is only the echo", () => {
+    expect(isOnlyEcho(polish, "za pomoc", "Dziękuję bardzo za pomoc.")).toBe(true);
+    expect(isOnlyEcho(polish, "dziękuję bardzo za pomoc", "Dziękuję bardzo za pomoc.")).toBe(false);
+  });
+  it("masks all but the first letter of each word", () => {
+    expect(maskWords("Nie, dziękuję.")).toBe("N__, d_______.");
   });
 });

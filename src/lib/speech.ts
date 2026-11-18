@@ -51,8 +51,21 @@ export function hasVoiceFor(tag: string): boolean {
   return voicesFor(tag).length > 0;
 }
 
+/** Rough spoken length, used for timeouts and as a fallback when the browser sends no word boundaries. */
+export function estimateSpeechMs(text: string, rate = 1): number {
+  const chars = Array.from(text);
+  const cjk = chars.filter((c) => /\p{Script=Han}/u.test(c)).length;
+  return ((chars.length - cjk) * 65 + cjk * 230) / rate;
+}
+
+export interface SpeakOptions {
+  rate?: number;
+  /** Called once, roughly halfway through the utterance (never if it ends first). */
+  onHalf?: () => void;
+}
+
 /** Speak `text`; resolves when done (or after a safety timeout — some browsers never fire `end`). */
-export function speak(text: string, tag: string, character: Character, opts: { rate?: number } = {}): Promise<void> {
+export function speak(text: string, tag: string, character: Character, opts: SpeakOptions = {}): Promise<void> {
   return new Promise((resolve) => {
     if (!synth) return resolve();
     synth.cancel();
@@ -64,13 +77,31 @@ export function speak(text: string, tag: string, character: Character, opts: { r
     u.pitch = character.pitch;
     u.rate = character.rate * (opts.rate ?? 1);
     let done = false;
+    let halfDone = !opts.onHalf;
+    let halfTimer: ReturnType<typeof setTimeout> | undefined;
+    const half = () => {
+      if (halfDone || done) return;
+      halfDone = true;
+      clearTimeout(halfTimer);
+      opts.onHalf?.();
+    };
     const finish = () => {
       if (done) return;
       done = true;
       clearTimeout(timer);
+      clearTimeout(halfTimer);
       resolve();
     };
-    const timer = setTimeout(finish, 1500 + Array.from(text).length * 180 / (opts.rate ?? 1));
+    const timer = setTimeout(finish, 1500 + (Array.from(text).length * 180) / (opts.rate ?? 1));
+    if (opts.onHalf) {
+      // Clock starts when audio actually starts (voices can take a moment to load).
+      u.onstart = () => {
+        halfTimer = setTimeout(half, estimateSpeechMs(text, u.rate) * 0.5);
+      };
+      u.onboundary = (e) => {
+        if (e.charIndex >= text.length * 0.5) half();
+      };
+    }
     u.onend = finish;
     u.onerror = finish;
     synth.speak(u);
@@ -110,45 +141,112 @@ export interface Listening {
   result: Promise<string[]>;
   stop(): void;
   abort(): void;
+  /** Held sessions (see `hold`) start ending on silence only after this is called. */
+  release(): void;
 }
 
-export function listen(tag: string, onInterim?: (text: string) => void): Listening {
+export interface ListenOptions {
+  onInterim?: (text: string) => void;
+  /**
+   * Keep listening across pauses and decide ourselves when the learner is done.
+   * Used when the mic opens while the voice is still talking: the recogniser may
+   * pick up the end of the voice first and the learner's answer after it.
+   */
+  continuous?: boolean;
+  /** Continuous only: don't end on silence until `release()` (e.g. until the voice has finished). */
+  hold?: boolean;
+  /** Continuous only: quiet time after speech that ends the turn. */
+  silenceMs?: number;
+}
+
+export function listen(tag: string, opts: ListenOptions = {}): Listening {
   const Ctor = recognitionCtor();
-  if (!Ctor) return { result: Promise.reject(new Error("Speech recognition not supported")), stop() {}, abort() {} };
+  const noop = () => {};
+  if (!Ctor) return { result: Promise.reject(new Error("Speech recognition not supported")), stop: noop, abort: noop, release: noop };
   const rec = new Ctor();
+  const continuous = !!opts.continuous;
   rec.lang = tag;
-  rec.continuous = false;
+  rec.continuous = continuous;
   rec.interimResults = true;
   rec.maxAlternatives = 5;
 
-  let finals: string[] = [];
-  let lastInterim = "";
+  // One entry per recognised segment, each with the recogniser's alternatives.
+  const segments: string[][] = [];
+  let interim = "";
+  let held = continuous && !!opts.hold;
+  let releasedAt = held ? Infinity : Date.now();
+  const startedAt = Date.now();
+  let lastResultAt = 0;
+  let poll: ReturnType<typeof setInterval> | undefined;
+
+  const candidates = (): string[] => {
+    const tops = segments.map((s) => s[0] ?? "");
+    const tail = interim.trim();
+    const all = [...tops, tail].filter(Boolean);
+    if (all.length === 0) return [];
+    const out = [all.join(" ")];
+    // Alternatives for the last segment, keeping earlier ones as heard.
+    const last = segments[segments.length - 1];
+    if (last && !tail) for (const alt of last.slice(1)) out.push([...tops.slice(0, -1), alt].filter(Boolean).join(" "));
+    // Each segment on its own: the learner's answer is often a separate segment from the voice's echo.
+    if (all.length > 1) out.push(...all);
+    return [...new Set(out.map((s) => s.trim()).filter(Boolean))];
+  };
+
   const result = new Promise<string[]>((resolve, reject) => {
     rec.onresult = (e) => {
-      let interim = "";
+      lastResultAt = Date.now();
+      let live = "";
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const r = e.results[i];
-        if (r.isFinal) {
-          finals = Array.from({ length: r.length }, (_, k) => r[k].transcript.trim()).filter(Boolean);
-        } else {
-          interim += r[0].transcript;
-        }
+        if (r.isFinal) segments[i] = Array.from({ length: r.length }, (_, k) => r[k].transcript.trim()).filter(Boolean);
+        else live += r[0].transcript;
       }
-      lastInterim = interim || lastInterim;
-      onInterim?.(finals[0] ?? interim);
+      interim = live;
+      opts.onInterim?.(candidates()[0] ?? "");
     };
     rec.onerror = (e) => {
       if (e.error === "no-speech" || e.error === "aborted") return; // onend resolves with what we have
+      clearInterval(poll);
       reject(new Error(e.error));
     };
-    rec.onend = () => resolve(finals.length ? finals : lastInterim ? [lastInterim.trim()] : []);
+    rec.onend = () => {
+      clearInterval(poll);
+      resolve(candidates());
+    };
   });
+
+  if (continuous) {
+    const silenceMs = opts.silenceMs ?? 1100;
+    poll = setInterval(() => {
+      const now = Date.now();
+      if (now - startedAt > 20_000) return rec.stop();
+      if (held) return;
+      const spokeSinceRelease = lastResultAt > releasedAt;
+      const quiet = now - Math.max(lastResultAt, releasedAt);
+      if (spokeSinceRelease && quiet >= silenceMs) rec.stop();
+      // Heard something before the voice finished (an answer spoken over it, or just its echo) and nothing since.
+      else if (!spokeSinceRelease && lastResultAt > 0 && quiet >= 2200) rec.stop();
+      else if (lastResultAt === 0 && quiet >= 7000) rec.stop();
+    }, 150);
+  }
+
   try {
     rec.start();
   } catch (err) {
-    return { result: Promise.reject(err), stop() {}, abort() {} };
+    clearInterval(poll);
+    return { result: Promise.reject(err), stop: noop, abort: noop, release: noop };
   }
-  return { result, stop: () => rec.stop(), abort: () => rec.abort() };
+  return {
+    result,
+    stop: () => rec.stop(),
+    abort: () => rec.abort(),
+    release: () => {
+      if (!held) return;
+      held = false;
+      releasedAt = Date.now();
+    },
+  };
 }
 
 /** iOS only allows speech after a user gesture: call this from the Start button. */

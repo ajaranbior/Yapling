@@ -36,19 +36,28 @@ if (synth) {
   synth.addEventListener?.("voiceschanged", loadVoices);
 }
 
+const norm = (lang: string) => lang.toLowerCase().replace("_", "-");
+
 export function voicesFor(tag: string): SpeechSynthesisVoice[] {
   const prefix = tag.split("-")[0].toLowerCase();
-  const all = loadVoices().filter((v) => v.lang.toLowerCase().replace("_", "-").startsWith(prefix));
-  // Prefer exact region match, then higher-quality ("Enhanced"/"Premium"/"Natural"/Google) voices.
+  const all = loadVoices().filter((v) => norm(v.lang).startsWith(prefix));
+  // On-device voices first: Chrome's online "Google" voices sound nice but can fail silently
+  // (no audio, sometimes no error), especially on macOS. Then exact region, then quality.
   const score = (v: SpeechSynthesisVoice) =>
-    (v.lang.toLowerCase().replace("_", "-") === tag.toLowerCase() ? 4 : 0) +
-    (/enhanced|premium|natural|neural|google/i.test(v.name) ? 2 : 0) +
-    (v.localService ? 1 : 0);
+    (v.localService ? 8 : 0) + (norm(v.lang) === tag.toLowerCase() ? 4 : 0) + (/enhanced|premium|natural|neural|google/i.test(v.name) ? 2 : 0);
   return all.sort((a, b) => score(b) - score(a));
 }
 
 export function hasVoiceFor(tag: string): boolean {
   return voicesFor(tag).length > 0;
+}
+
+/** The voice a character uses: rotates through on-device voices (online ones only if there are none). */
+function voiceFor(tag: string, character: Character): SpeechSynthesisVoice | null {
+  const voices = voicesFor(tag);
+  const local = voices.filter((v) => v.localService);
+  const pool = local.length ? local : voices;
+  return pool.length ? pool[character.voiceSlot % pool.length] : null;
 }
 
 /** Rough spoken length, used for timeouts and as a fallback when the browser sends no word boundaries. */
@@ -64,51 +73,105 @@ export interface SpeakOptions {
   onHalf?: () => void;
 }
 
-/** Speak `text`; resolves when done (or after a safety timeout — some browsers never fire `end`). */
-export function speak(text: string, tag: string, character: Character, opts: SpeakOptions = {}): Promise<void> {
-  return new Promise((resolve) => {
-    if (!synth) return resolve();
+// Chrome garbage-collects utterances that nothing references, and then never fires their events.
+let current: SpeechSynthesisUtterance | null = null;
+let speakId = 0;
+const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** How long to wait for audio to actually start before trying another voice. */
+const START_TIMEOUT_MS = 2500;
+
+/**
+ * Speak `text`; resolves when done (or after a safety timeout — some browsers never fire `end`).
+ *
+ * Chrome quirks handled here: `speak()` straight after `cancel()` is sometimes dropped, the
+ * synth can get stuck "paused", and a voice (usually an online one) can fail without a sound.
+ * If audio hasn't started after a moment, we try once more with the browser's default voice.
+ */
+export async function speak(text: string, tag: string, character: Character, opts: SpeakOptions = {}): Promise<void> {
+  if (!synth) return;
+  const id = ++speakId;
+  if (synth.speaking || synth.pending) {
     synth.cancel();
+    await sleepMs(60);
+    if (id !== speakId) return;
+  }
+  const preferred = voiceFor(tag, character);
+  const started = await speakOnce(text, tag, character, preferred, opts, id);
+  if (started || id !== speakId) return;
+  console.warn(`Yapling: no audio from voice ${preferred?.name ?? "(default)"}, retrying with the default voice`);
+  synth.cancel();
+  await sleepMs(60);
+  if (id !== speakId) return;
+  await speakOnce(text, tag, character, null, opts, id);
+}
+
+/** Resolves true once the utterance played (or false if it never started). */
+function speakOnce(
+  text: string,
+  tag: string,
+  character: Character,
+  voice: SpeechSynthesisVoice | null,
+  opts: SpeakOptions,
+  id: number,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (!synth) return resolve(true);
     const u = new SpeechSynthesisUtterance(text);
+    current = u;
     u.lang = tag;
-    const voices = voicesFor(tag);
-    if (voices.length) u.voice = voices[character.voiceSlot % voices.length];
+    if (voice) u.voice = voice;
     // If this character shares a voice with others, the pitch shift keeps them distinct.
     u.pitch = character.pitch;
     u.rate = character.rate * (opts.rate ?? 1);
+    u.volume = 1;
+    let started = false;
     let done = false;
     let halfDone = !opts.onHalf;
     let halfTimer: ReturnType<typeof setTimeout> | undefined;
+    let endTimer: ReturnType<typeof setTimeout> | undefined;
     const half = () => {
       if (halfDone || done) return;
       halfDone = true;
       clearTimeout(halfTimer);
       opts.onHalf?.();
     };
-    const finish = () => {
+    const finish = (ok: boolean) => {
       if (done) return;
       done = true;
-      clearTimeout(timer);
+      clearTimeout(startTimer);
+      clearTimeout(endTimer);
       clearTimeout(halfTimer);
-      resolve();
+      if (current === u) current = null;
+      resolve(ok);
     };
-    const timer = setTimeout(finish, 1500 + (Array.from(text).length * 180) / (opts.rate ?? 1));
-    if (opts.onHalf) {
+    // A superseded call (another speak() or stopSpeaking()) counts as played: nothing to retry.
+    const startTimer = setTimeout(() => finish(id !== speakId || started), START_TIMEOUT_MS);
+    u.onstart = () => {
+      started = true;
+      clearTimeout(startTimer);
+      endTimer = setTimeout(() => finish(true), 1500 + (Array.from(text).length * 180) / (opts.rate ?? 1));
       // Clock starts when audio actually starts (voices can take a moment to load).
-      u.onstart = () => {
-        halfTimer = setTimeout(half, estimateSpeechMs(text, u.rate) * 0.5);
-      };
+      if (opts.onHalf) halfTimer = setTimeout(half, estimateSpeechMs(text, u.rate) * 0.5);
+    };
+    if (opts.onHalf) {
       u.onboundary = (e) => {
         if (e.charIndex >= text.length * 0.5) half();
       };
     }
-    u.onend = finish;
-    u.onerror = finish;
+    u.onend = () => finish(true);
+    u.onerror = (e) => {
+      // "interrupted"/"canceled" = we stopped it on purpose; anything else before audio started means try another voice.
+      const intentional = e.error === "interrupted" || e.error === "canceled";
+      finish(started || intentional || id !== speakId);
+    };
+    synth.resume(); // Chrome can be left paused (e.g. after the tab was in the background)
     synth.speak(u);
   });
 }
 
 export function stopSpeaking() {
+  speakId++;
   synth?.cancel();
 }
 
@@ -249,9 +312,16 @@ export function listen(tag: string, opts: ListenOptions = {}): Listening {
   };
 }
 
-/** iOS only allows speech after a user gesture: call this from the Start button. */
+const isIOS = () =>
+  typeof navigator !== "undefined" &&
+  (/iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1));
+
+/**
+ * iOS only allows speech after a user gesture: call this from the Start button. Not done
+ * elsewhere: on desktop Chrome a silent blank utterance can leave the speech queue stuck.
+ */
 export function primeTts() {
-  if (!synth) return;
+  if (!synth || !isIOS()) return;
   const u = new SpeechSynthesisUtterance(" ");
   u.volume = 0;
   synth.speak(u);

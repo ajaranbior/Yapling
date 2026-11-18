@@ -364,14 +364,18 @@ export function SessionView({
     next();
   };
 
-  /** "I don't know": drops the card back to be re-introduced, shows it right now, and brings it back later. */
+  /**
+   * "I don't know": drops the card back to be re-introduced, shows it right now (again, for a
+   * new card), and brings it back later in the session. Also logged when the card was already
+   * answered this session, so the stage really goes back to 0.
+   */
   const dunno = () => {
     stopAll();
-    if (!logged.current.has(card.key)) {
-      logged.current.add(card.key);
-      log.current.push({ card, verdict: "dunno", heard: "" });
-      onAttempt(card, "dunno");
-    }
+    const entry = log.current.find((l) => l.card.key === card.key);
+    if (entry) entry.verdict = "dunno";
+    else log.current.push({ card, verdict: "dunno", heard: "" });
+    if (!logged.current.has(card.key) || entry?.verdict !== "dunno" || true) onAttempt(card, "dunno");
+    logged.current.add(card.key);
     attempts.current = 0;
     setStreak(0);
     playVerdict("dunno");
@@ -428,7 +432,7 @@ export function SessionView({
       else if (k === "r") void replay();
       else if (k === "h" && prompted && !revealed) showHint();
       else if (k === "s") skip();
-      else if (k === "d" && mode !== "learn" && phase !== "feedback") dunno();
+      else if (k === "d" && phase !== "checking" && !(phase === "feedback" && accepted)) dunno();
       else if (k === "t") setTyping((t) => !t);
     };
     window.addEventListener("keydown", onKey);
@@ -557,6 +561,11 @@ export function SessionView({
                 {phase === "checking" ? <span className="spinner" /> : "🎙️"}
               </button>
             )}
+            {phase !== "checking" && (
+              <button className="btn ghost dunno-btn" onClick={dunno} aria-label="I don't know this">
+                🤷 Dunno
+              </button>
+            )}
           </div>
         )}
 
@@ -618,6 +627,11 @@ export function SessionView({
                   ↻ Try again
                 </button>
               )}
+              {!accepted && result.verdict !== "dunno" && (
+                <button className="btn ghost" onClick={dunno}>
+                  🤷 Dunno
+                </button>
+              )}
               {accepted && !stayed.current && ADVANCE_MS[result.verdict] && (
                 <button className="btn ghost" onClick={stay}>
                   ⏸ Stay
@@ -665,11 +679,6 @@ export function SessionView({
           {typing ? "🎙️" : "⌨️"}
           <span>{typing ? "Speak" : "Type"}</span>
         </button>
-        {mode !== "learn" && phase !== "feedback" && (
-          <button className="tool" onClick={dunno} aria-label="I don't know this">
-            🤷<span>Dunno</span>
-          </button>
-        )}
         <button className="tool" onClick={skip} aria-label="Skip">
           ⏭<span>Skip</span>
         </button>

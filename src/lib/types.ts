@@ -37,7 +37,16 @@ export interface Topic {
   items: ContentItem[];
 }
 
-export type Verdict = "perfect" | "alternative" | "unnatural" | "close" | "wrong" | "skipped";
+/** "dunno": the learner said they don't know it — it drops back to being re-introduced. */
+export type Verdict = "perfect" | "alternative" | "unnatural" | "close" | "wrong" | "skipped" | "dunno";
+
+/**
+ * How a card is practised, from its stage in stats:
+ * - learn: new (or forgotten) — see it, hear it, parrot it back.
+ * - echo: hear it without the text, say it back.
+ * - recall: see the meaning, say it yourself.
+ */
+export type CardMode = "learn" | "echo" | "recall";
 
 export interface GradeResult {
   verdict: Verdict;
@@ -62,8 +71,8 @@ export interface Card {
   topicId: string;
   /** The word this card builds on (sentence cards show it as a hint). */
   focusWord?: string;
-  /** First time this word is shown: always played and repeated, even in translate mode. */
-  intro?: boolean;
+  /** How this card is practised this time (see CardMode). Defaults to "recall". */
+  mode?: CardMode;
 }
 
 export interface CardStat {
@@ -79,4 +88,9 @@ export interface CardStat {
   /** Exponentially-weighted error rate, 0..1. Higher = more trouble. */
   trouble: number;
   lastSeen: number;
+  /**
+   * Knowledge stage: 0 = (re)introduce, 1 = echo, 2+ = recall. Moves up one step per session
+   * on a good answer, down on a miss, back to 0 on "dunno". Missing on old stats (see stageOf).
+   */
+  stage?: number;
 }

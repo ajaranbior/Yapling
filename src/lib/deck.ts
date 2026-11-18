@@ -1,5 +1,5 @@
 import type { LanguageConfig } from "./languages/types";
-import type { Stats } from "./storage";
+import { modeForStage, stageOf, type Stats } from "./storage";
 import { levelRank, type Card, type ContentItem, type Level, type Phrase } from "./types";
 
 export function cardKey(lang: string, itemId: string, n: number | "w") {
@@ -38,6 +38,11 @@ export function sentencesForLevel(lang: LanguageConfig, topicId: string, item: C
   return cards.filter((x) => x.lvl === best).map((x) => x.c);
 }
 
+/** Set each card's mode (learn / echo / recall) from how well it's known. */
+export function withModes(cards: Card[], stats: Stats): Card[] {
+  return cards.map((c) => ({ ...c, mode: modeForStage(stageOf(stats[c.key])) }));
+}
+
 function shuffle<T>(arr: T[]): T[] {
   const a = [...arr];
   for (let i = a.length - 1; i > 0; i--) {
@@ -58,7 +63,8 @@ export interface DeckOptions {
 /**
  * Build a session: new words are introduced and immediately used in a sentence
  * (word → sentence), a second sentence comes back a few cards later (spacing),
- * and cards you've struggled with before are mixed in.
+ * and cards you've struggled with before are mixed in. Every card's mode comes from
+ * its stage, so anything new — at any level — is introduced before it's asked for.
  */
 export function buildLearnDeck(lang: LanguageConfig, opts: DeckOptions, stats: Stats): Card[] {
   const { topicIds, size, level, interests } = opts;
@@ -82,11 +88,17 @@ export function buildLearnDeck(lang: LanguageConfig, opts: DeckOptions, stats: S
   // then the rest by how shaky they are.
   const fresh = items.filter((x) => !itemSeen(x));
   if (interests.length) fresh.sort((a, b) => Number(likes(b.topicId)) - Number(likes(a.topicId)));
+  // Lowest stage among the item's cards that have been seen: < 2 means still being learned (learn/echo).
+  const minStage = (x: (typeof items)[number]) => {
+    const keys = [cardKey(lang.code, x.item.id, "w"), ...x.sentences.map((c) => c.key)].filter(seen);
+    return Math.min(...keys.map((k) => stageOf(stats[k])));
+  };
+  const inProgress = (x: (typeof items)[number]) => minStage(x) < 2;
   const known = shuffle(items.filter(itemSeen));
   known.sort((a, b) => {
     const ta = Math.max(...a.sentences.map((c) => trouble(c.key)), trouble(cardKey(lang.code, a.item.id, "w")));
     const tb = Math.max(...b.sentences.map((c) => trouble(c.key)), trouble(cardKey(lang.code, b.item.id, "w")));
-    return tb - ta || Number(likes(b.topicId)) - Number(likes(a.topicId));
+    return Number(inProgress(b)) - Number(inProgress(a)) || tb - ta || Number(likes(b.topicId)) - Number(likes(a.topicId));
   });
 
   const deck: Card[] = [];
@@ -98,10 +110,11 @@ export function buildLearnDeck(lang: LanguageConfig, opts: DeckOptions, stats: S
   };
 
   // Mix: two fresh items, then one known item, so it doesn't feel like a wall of new stuff.
+  // Items you're still learning (from earlier sessions) alternate one-to-one, so they move on.
   const order: typeof items = [];
   while (fresh.length || known.length) {
     if (fresh.length) order.push(fresh.shift()!);
-    if (fresh.length) order.push(fresh.shift()!);
+    if (fresh.length && !(known.length && inProgress(known[0]))) order.push(fresh.shift()!);
     if (known.length) order.push(known.shift()!);
   }
 
@@ -109,25 +122,29 @@ export function buildLearnDeck(lang: LanguageConfig, opts: DeckOptions, stats: S
     if (deck.length >= size) break;
     const word = wordCard(lang, x.topicId, x.item);
     const isNew = !itemSeen(x);
-    // Words below your level are assumed known: go straight to using them.
+    // Words below your level are assumed known: go straight to (being introduced to) a sentence using them.
     const wordAtLevel = levelRank(x.item.level) === L || L === 0;
-    if (isNew && wordAtLevel) deck.push({ ...word, intro: true });
-    else if (trouble(word.key) > 0.25) deck.push(word);
+    // A word you've started learning keeps coming back until you've recalled it once.
+    const wordLearning = seen(word.key) && stageOf(stats[word.key]) < 3;
+    if ((isNew && wordAtLevel) || wordLearning || trouble(word.key) > 0.25) deck.push(word);
     // Known items: lead with their shakiest sentence.
-    const ordered = isNew ? x.sentences : [...x.sentences].sort((a, b) => trouble(b.key) - trouble(a.key));
+    const ordered = isNew
+      ? x.sentences
+      : [...x.sentences].sort((a, b) => stageOf(stats[a.key]) - stageOf(stats[b.key]) || trouble(b.key) - trouble(a.key));
     if (ordered[0]) deck.push(ordered[0]);
     if (ordered[1]) delayed.push({ card: ordered[1], due: deck.length + 3 });
     flushDue();
   }
   while (delayed.length && deck.length < size) deck.push(delayed.shift()!.card);
-  return deck.slice(0, size);
+  return withModes(deck.slice(0, size), stats);
 }
 
 /** A session made only of cards you've had trouble with. */
-export function buildReviewDeck(lang: LanguageConfig, keys: string[], size: number): Card[] {
+export function buildReviewDeck(lang: LanguageConfig, keys: string[], size: number, stats: Stats): Card[] {
   const byKey = new Map(allCards(lang).map((c) => [c.key, c]));
-  return keys
+  const cards = keys
     .map((k) => byKey.get(k))
     .filter((c): c is Card => !!c)
     .slice(0, size);
+  return withModes(cards, stats);
 }

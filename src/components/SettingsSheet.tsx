@@ -1,18 +1,35 @@
 import { AI_MODELS } from "../lib/aiModels";
-import { asrSupported } from "../lib/speech";
+import { useState } from "react";
+import type { LanguageConfig } from "../lib/languages/types";
+import { asrSupported, CHARACTERS, speak, ttsSupported, voicesFor } from "../lib/speech";
 import type { Settings } from "../lib/storage";
 
 export function SettingsSheet({
+  lang,
   settings,
   update,
   onResetStats,
   onClose,
 }: {
+  lang: LanguageConfig;
   settings: Settings;
   update: (patch: Partial<Settings>) => void;
   onResetStats: () => void;
   onClose: () => void;
 }) {
+  const [voiceInfo, setVoiceInfo] = useState<string | null>(null);
+  const testVoice = () => {
+    const voices = voicesFor(lang.speechTag);
+    setVoiceInfo(
+      !ttsSupported()
+        ? "This browser can't speak."
+        : voices.length
+          ? `${lang.name} voices: ${voices.map((v) => `${v.name}${v.localService ? "" : " (online)"}`).join(", ")}`
+          : `No ${lang.name} voice installed — the browser will try its default voice.`,
+    );
+    void speak(lang.topics[0].items[0].word.text, lang.speechTag, CHARACTERS[0], { rate: settings.speechRate });
+  };
+
   return (
     <div className="sheet-backdrop" onClick={onClose}>
       <div className="sheet" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Settings">
@@ -36,13 +53,7 @@ export function SettingsSheet({
           checked={settings.earlyMic}
           onChange={(v) => update({ earlyMic: v })}
         />
-        <Toggle
-          label="Hide text while answering"
-          hint="Repeat mode: answer from memory (tap to peek)"
-          checked={settings.hideTextWhileSpeaking}
-          onChange={(v) => update({ hideTextWhileSpeaking: v })}
-        />
-        <label className="field">
+<label className="field">
           <span>Voice speed · {settings.speechRate.toFixed(2)}×</span>
           <input
             type="range"
@@ -53,6 +64,10 @@ export function SettingsSheet({
             onChange={(e) => update({ speechRate: Number(e.target.value) })}
           />
         </label>
+        <button className="btn ghost" onClick={testVoice}>
+          🔊 Test {lang.name} voice
+        </button>
+        {voiceInfo && <p className="muted small">{voiceInfo} No sound? Check your volume / output device, and on a Mac make sure a voice for this language is installed (System Settings → Accessibility → Spoken Content → System voice → Manage Voices).</p>}
         {!asrSupported() && <p className="warn">This browser has no speech recognition — you'll type answers. Chrome, Edge and Safari support speaking.</p>}
 
         <h2>Smarter feedback (optional)</h2>

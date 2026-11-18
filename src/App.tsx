@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
 import { Home } from "./components/Home";
-import { Onboarding } from "./components/Onboarding";
+import { Onboarding, type OnboardingStep } from "./components/Onboarding";
 import { SessionView, type SessionResult } from "./components/SessionView";
 import { SettingsSheet } from "./components/SettingsSheet";
 import { Summary } from "./components/Summary";
 import { Trouble } from "./components/Trouble";
-import { buildLearnDeck } from "./lib/deck";
+import { buildLearnDeck, withModes } from "./lib/deck";
 import { getLanguage } from "./lib/languages";
 import { setSoundEnabled, unlockAudio } from "./lib/sounds";
 import { primeTts } from "./lib/speech";
 import {
+  levelFor,
   loadBest,
   loadSettings,
   loadStats,
@@ -25,7 +26,7 @@ import type { Card, Verdict } from "./lib/types";
 
 type Screen =
   | { name: "home" }
-  | { name: "onboarding" }
+  | { name: "onboarding"; start?: OnboardingStep; only?: boolean }
   | { name: "trouble" }
   | { name: "session"; deck: Card[]; id: number }
   | { name: "summary"; result: SessionResult; isNewBest: boolean };
@@ -47,18 +48,25 @@ export default function App() {
 
   const update = useCallback((patch: Partial<Settings>) => setSettings((s) => ({ ...s, ...patch })), []);
 
+  /** Cards from review lists (trouble spots, missed) get their mode from the latest stats. */
   const startDeck = (deck: Card[]) => {
     if (!deck.length) return;
     unlockAudio();
     primeTts();
-    setScreen({ name: "session", deck, id: Date.now() });
+    setScreen({ name: "session", deck: withModes(deck, stats), id: Date.now() });
+  };
+
+  const switchLang = (code: string) => {
+    update({ lang: code });
+    // First time on this language: ask for the level in it.
+    if (!settings.levels[code]) setScreen({ name: "onboarding", start: "level", only: true });
   };
 
   const startLearn = () =>
     startDeck(
       buildLearnDeck(
         lang,
-        { topicIds: settings.topics[lang.code] ?? [], size: settings.sessionSize, level: settings.level, interests: settings.interests },
+        { topicIds: settings.topics[lang.code] ?? [], size: settings.sessionSize, level: levelFor(settings, lang.code), interests: settings.interests },
         stats,
       ),
     );
@@ -87,6 +95,8 @@ export default function App() {
       {screen.name === "onboarding" && (
         <Onboarding
           settings={settings}
+          start={screen.start}
+          only={screen.only}
           onDone={(patch) => {
             update(patch);
             setScreen({ name: "home" });
@@ -102,7 +112,8 @@ export default function App() {
           update={update}
           onStart={startLearn}
           onTrouble={() => setScreen({ name: "trouble" })}
-          onEditProfile={() => setScreen({ name: "onboarding" })}
+          onEditProfile={() => setScreen({ name: "onboarding", start: "interests", only: true })}
+          onSwitchLang={switchLang}
           onSettings={() => setShowSettings(true)}
         />
       )}
@@ -132,6 +143,7 @@ export default function App() {
       )}
       {showSettings && (
         <SettingsSheet
+          lang={lang}
           settings={settings}
           update={update}
           onResetStats={() => {

@@ -2,7 +2,7 @@ import { LANGUAGES } from "../lib/languages";
 import type { LanguageConfig } from "../lib/languages/types";
 import { INTERESTS, LEVEL_INFO } from "../lib/profile";
 import { hasVoiceFor } from "../lib/speech";
-import type { Settings } from "../lib/storage";
+import { levelFor, type Settings } from "../lib/storage";
 import { LEVELS } from "../lib/types";
 import { Mascot } from "./Mascot";
 
@@ -18,6 +18,7 @@ export function Home({
   onTrouble,
   onSettings,
   onEditProfile,
+  onSwitchLang,
 }: {
   lang: LanguageConfig;
   settings: Settings;
@@ -28,7 +29,9 @@ export function Home({
   onTrouble: () => void;
   onSettings: () => void;
   onEditProfile: () => void;
+  onSwitchLang: (code: string) => void;
 }) {
+  const level = levelFor(settings, lang.code);
   const selected = settings.topics[lang.code] ?? [];
   const toggleTopic = (id: string) => {
     const next = selected.includes(id) ? selected.filter((t) => t !== id) : [...selected, id];
@@ -55,7 +58,7 @@ export function Home({
         <h2>Language</h2>
         <div className="lang-row">
           {LANGUAGES.map((l) => (
-            <button key={l.code} className={`lang-btn ${l.code === lang.code ? "active" : ""}`} onClick={() => update({ lang: l.code })}>
+            <button key={l.code} className={`lang-btn ${l.code === lang.code ? "active" : ""}`} onClick={() => onSwitchLang(l.code)}>
               <span className="flag">{l.flag}</span>
               <span>{l.name}</span>
               <small>{l.nativeName}</small>
@@ -66,31 +69,20 @@ export function Home({
       </section>
 
       <section>
-        <h2>Level</h2>
+        <h2>
+          Level <small>· {lang.name}</small>
+        </h2>
         <div className="chips">
           {LEVELS.map((l) => (
-            <button key={l} className={`chip ${settings.level === l ? "active" : ""}`} onClick={() => update({ level: l })}>
+            <button
+              key={l}
+              className={`chip ${level === l ? "active" : ""}`}
+              onClick={() => update({ levels: { ...settings.levels, [lang.code]: l } })}
+            >
               {LEVEL_INFO[l].emoji} {LEVEL_INFO[l].label}
             </button>
           ))}
         </div>
-      </section>
-
-      <section>
-        <h2>Mode</h2>
-        <div className="chips">
-          <button className={`chip ${settings.practiceMode === "translate" ? "active" : ""}`} onClick={() => update({ practiceMode: "translate" })}>
-            🧠 Translate
-          </button>
-          <button className={`chip ${settings.practiceMode === "repeat" ? "active" : ""}`} onClick={() => update({ practiceMode: "repeat" })}>
-            🦜 Repeat
-          </button>
-        </div>
-        <p className="muted small">
-          {settings.practiceMode === "translate"
-            ? `See the meaning, say it in ${lang.name}. New words are shown first.`
-            : "Hear the phrase, say it back."}
-        </p>
       </section>
 
       <section>
@@ -128,7 +120,8 @@ export function Home({
           🎯 Trouble spots {troubleCount > 0 && <span className="pill">{troubleCount}</span>}
         </button>
       </div>
-      <p className="kbd-hint">Keyboard: Space = talk / next · ← back · → next/skip · H = hint · R = replay · S = skip · T = type</p>
+      <p className="muted small center">New words and sentences are shown first: hear them, repeat them. Next time you hear them without the text, and later you say them from the English. Tap 🤷 “Dunno” anytime to go back a step.</p>
+      <p className="kbd-hint">Keyboard: Space = talk / next · ← back · → next/skip · H = hint · D = dunno · R = replay · S = skip · T = type</p>
     </div>
   );
 }

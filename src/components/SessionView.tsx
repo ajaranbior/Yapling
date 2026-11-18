@@ -22,7 +22,7 @@ export interface SessionResult {
 
 type Phase = "intro" | "answer" | "listening" | "checking" | "feedback";
 
-const RANK: Verdict[] = ["perfect", "alternative", "unnatural", "close", "wrong", "skipped"];
+const RANK: Verdict[] = ["perfect", "alternative", "unnatural", "close", "wrong", "skipped", "dunno"];
 
 const VERDICT_UI: Record<Verdict, { emoji: string; title: string; mood: Mood }> = {
   perfect: { emoji: "🎯", title: "Perfect!", mood: "cheer" },
@@ -31,6 +31,7 @@ const VERDICT_UI: Record<Verdict, { emoji: string; title: string; mood: Mood }> 
   close: { emoji: "🤏", title: "So close!", mood: "meh" },
   wrong: { emoji: "💪", title: "Good try!", mood: "sad" },
   skipped: { emoji: "⏭", title: "Skipped", mood: "idle" },
+  dunno: { emoji: "🤷", title: "No worries — here it is", mood: "happy" },
 };
 
 /** How long accepted answers stay on screen before moving on (after the answer audio, in translate mode). */
@@ -76,6 +77,8 @@ export function SessionView({
   const [notice, setNotice] = useState<string | null>(null);
   const [autoAdvance, setAutoAdvance] = useState<number | null>(null);
   const [speaking, setSpeaking] = useState(false);
+  /** Bumps when the current card is replayed in place (after "Dunno"). */
+  const [rev, setRev] = useState(0);
 
   const log = useRef<LogEntry[]>([]);
   const attempts = useRef(0);
@@ -87,8 +90,9 @@ export function SessionView({
   const logged = useRef(new Set<string>()); // first attempt per card counts for stats
 
   const card = queue[index];
-  /** Translate mode: you see the meaning and say it in the target language. New words are still shown first. */
-  const prompted = settings.practiceMode === "translate" && !card.intro;
+  const mode = card.mode ?? "recall";
+  /** Recall: you see the meaning and say it yourself. Learn/echo cards are played first and said back. */
+  const prompted = mode === "recall";
   const revealed = !prompted || hint >= 2 || phase === "feedback";
   const autoMic = settings.autoMic && !typing && asrSupported();
 
@@ -328,7 +332,7 @@ export function SessionView({
       if (autoMic) void startListening();
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [index]);
+  }, [index, rev]);
 
   /** Replay the phrase (stops the mic first so it doesn't hear the voice), then listen again. */
   const replay = async (rate = 1) => {
@@ -358,6 +362,29 @@ export function SessionView({
     }
     playVerdict("skipped");
     next();
+  };
+
+  /** "I don't know": drops the card back to be re-introduced, shows it right now, and brings it back later. */
+  const dunno = () => {
+    stopAll();
+    if (!logged.current.has(card.key)) {
+      logged.current.add(card.key);
+      log.current.push({ card, verdict: "dunno", heard: "" });
+      onAttempt(card, "dunno");
+    }
+    attempts.current = 0;
+    setStreak(0);
+    playVerdict("dunno");
+    setQueue((q) => {
+      const copy = [...q];
+      copy[index] = { ...card, mode: "learn" };
+      if (!requeued.current.has(card.key)) {
+        requeued.current.add(card.key);
+        copy.splice(Math.min(index + 4, copy.length), 0, { ...card, mode: "echo" });
+      }
+      return copy;
+    });
+    setRev((r) => r + 1);
   };
 
   const stay = () => {
@@ -401,6 +428,7 @@ export function SessionView({
       else if (k === "r") void replay();
       else if (k === "h" && prompted && !revealed) showHint();
       else if (k === "s") skip();
+      else if (k === "d" && mode !== "learn" && phase !== "feedback") dunno();
       else if (k === "t") setTyping((t) => !t);
     };
     window.addEventListener("keydown", onKey);
@@ -413,10 +441,12 @@ export function SessionView({
   const ui = result ? VERDICT_UI[result.verdict] : null;
   const mood: Mood =
     phase === "listening" ? "listening" : phase === "checking" ? "thinking" : ui ? ui.mood : speaking ? "happy" : "idle";
-  const hideText = !prompted && settings.hideTextWhileSpeaking && (phase === "answer" || phase === "listening") && !peek;
+  // Echo: hear it and say it back without reading it (tap to peek).
+  const hideText = mode === "echo" && phase !== "feedback" && !peek;
   const accepted = result && isAccepted(result.verdict);
   const hintText = lang.hasRomanization && card.phrase.romanization ? maskWords(card.phrase.romanization) : maskWords(card.phrase.text);
-  const kindLabel = card.kind === "word" ? (card.intro ? "✨ New word" : "🔁 Word") : prompted ? "🧠 Say it" : "🧩 Use it";
+  const kindLabel =
+    mode === "learn" ? (card.kind === "word" ? "✨ New word" : "✨ New sentence") : mode === "echo" ? "🦜 Say it back" : "🧠 Say it";
 
   const onCardTap = () => {
     if (prompted && !revealed) showHint();
@@ -488,9 +518,9 @@ export function SessionView({
 
         {phase !== "feedback" && (
           <div className="answer-zone">
-            {phase === "intro" && <div className="hint">Listen…</div>}
-            {phase === "answer" && <div className="hint">Your turn — say it!</div>}
-            {phase === "listening" && <div className="hint">{speaking ? "Listening — jump in whenever you're ready" : "Listening… say it!"}</div>}
+            {phase === "intro" && <div className="hint">{mode === "learn" ? "New! Listen…" : "Listen…"}</div>}
+            {phase === "answer" && <div className="hint">{mode === "recall" ? "Your turn — say it!" : "Your turn — repeat it!"}</div>}
+            {phase === "listening" && <div className="hint">{speaking ? "Listening — jump in whenever you're ready" : mode === "recall" ? "Listening… say it!" : "Listening… repeat it!"}</div>}
             {phase === "checking" && <div className="hint">Checking…</div>}
             {interim && !speaking && <div className="interim">“{interim}”</div>}
             {notice && <div className="notice">{notice}</div>}
@@ -635,6 +665,11 @@ export function SessionView({
           {typing ? "🎙️" : "⌨️"}
           <span>{typing ? "Speak" : "Type"}</span>
         </button>
+        {mode !== "learn" && phase !== "feedback" && (
+          <button className="tool" onClick={dunno} aria-label="I don't know this">
+            🤷<span>Dunno</span>
+          </button>
+        )}
         <button className="tool" onClick={skip} aria-label="Skip">
           ⏭<span>Skip</span>
         </button>

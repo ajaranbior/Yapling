@@ -62,6 +62,7 @@ export function playVerdict(v: Verdict, streak = 0) {
       tone(330, 0, 0.25, "sawtooth", 0.07, 220);
       break;
     case "skipped":
+    case "dunno":
       tone(392, 0, 0.08, "sine", 0.08);
       break;
   }

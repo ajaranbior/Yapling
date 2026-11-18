@@ -192,7 +192,7 @@ mark { background: color-mix(in srgb, var(--accent2) 35%, transparent); color: i
 .auto-bar { height: 4px; background: var(--good); border-radius: 2px; transform-origin: left; animation: shrink linear forwards; }
 @keyframes shrink { from { transform: scaleX(1); } to { transform: scaleX(0); } }
 
-.tools { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+.tools { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 6px; }
 .tool { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 10px 0; border-radius: 14px; background: var(--bg2); font-size: 1.3rem; }
 .tool span { font-size: 0.72rem; color: var(--muted); }
 

@@ -13,6 +13,7 @@ export const POINTS: Record<Verdict, number> = {
   close: 3,
   wrong: 1,
   skipped: 0,
+  dunno: 0,
 };
 
 export const isAccepted = (v: Verdict) => v === "perfect" || v === "alternative" || v === "unnatural";

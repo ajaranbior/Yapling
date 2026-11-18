@@ -47,15 +47,21 @@ src/
 
 ## How a session works
 
+- **Onboarding**: language → level in that language → interests. Levels are per language (`Settings.levels`);
+  switching to a language with no level yet asks for one. The old single `level` setting is only migrated from.
 - **Levels** (`beginner` / `intermediate` / `advanced`): items and sentences carry an optional `level`
   (default: beginner; a sentence defaults to its item's level). A learner only gets items at or below their level,
   and for each item only the sentences of the highest level that fits. Words below the learner's level skip the
-  "new word" card.
+  word card (their sentences are still introduced).
 - **Interests**: topics list the interest ids they serve (`Topic.interests`); new items from matching topics come first.
-- **Modes**: `translate` (default) shows the English and asks for the target language, with hints (first letters →
-  full answer, each lowers the points). Cards flagged `intro` (a new word at your level) are always played and repeated.
-  `repeat` plays the phrase and asks you to say it back.
-- **Early mic** (repeat mode/intro cards): the mic opens about halfway through the voice in continuous mode and is
+- **Stages, not modes**: each card has a stage in stats (`CardStat.stage`, see `stageOf`/`modeForStage` in
+  `storage.ts`) that sets its `Card.mode`: `learn` (stage 0: text + audio, parrot it back) → `echo` (stage 1: hear it,
+  text hidden, say it back) → `recall` (stage 2+: see the English, say it, with hints). Only the first attempt per
+  session is recorded, so a card moves up at most one stage per session; a wrong answer moves it down, and the
+  🤷 **Dunno** button (`dunno` verdict) resets it to 0, re-introduces it on the spot and brings it back later in the
+  session. Everything new is introduced before it's asked for, at every level. Items still being learned get more
+  room in the next session's deck.
+- **Early mic** (learn/echo cards): the mic opens about halfway through the voice in continuous mode and is
   held open until the voice finishes. The grader also scores the transcript with the voice's echo stripped off, and a
   transcript that is only the echo is ignored.
 
@@ -69,4 +75,6 @@ src/
 - Add a test in `grader.test.ts` or `deck.test.ts` when changing grading or deck logic.
 - Settings are merged over `DEFAULT_SETTINGS`, so new settings need a default there; don't rename existing keys.
 - The Web Speech API behaves differently per browser (Chrome, Safari/iOS); keep fallbacks (typing, safety timeouts).
+  `speak()` prefers on-device voices, waits a beat after `cancel()`, and retries with the default voice if no audio
+  starts (Chrome on macOS can fail silently with online voices). Settings has a "Test voice" button.
 - Keep the UI fast: few taps, short auto-advance, keyboard shortcuts on desktop.

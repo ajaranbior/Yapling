@@ -1,5 +1,12 @@
 import type { Topic } from "../types";
 
+export interface NumberSpan {
+  start: number;
+  /** Exclusive. */
+  end: number;
+  value: number;
+}
+
 export interface NaturalnessHint {
   /** Replace with this suggestion (usually the expected sentence). */
   better: string;
@@ -44,5 +51,11 @@ export interface LanguageConfig {
    * Return a hint when it is grammatical but a native wouldn't say it that way.
    */
   naturalness?(heardTokens: string[], expectedTokens: string[], expected: string): NaturalnessHint | null;
+  /**
+   * Find spelled-out numbers in normalized tokens ("od trzech lat" → 3 at [2, 3)).
+   * Speech recognisers often write numbers as digits; the grader uses these spans to
+   * spell the learner's digits the way the target sentence does.
+   */
+  numbers?(tokens: string[]): NumberSpan[];
   topics: Topic[];
 }

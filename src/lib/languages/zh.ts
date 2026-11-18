@@ -1,4 +1,5 @@
 import { mandarinTopics } from "../../content/zh";
+import { mandarinNumbers } from "./numbers";
 import type { LanguageConfig } from "./types";
 
 const DIGITS = "零一二三四五六七八九";
@@ -53,5 +54,6 @@ export const mandarin: LanguageConfig = {
     }
     return null;
   },
+  numbers: mandarinNumbers,
   topics: mandarinTopics,
 };

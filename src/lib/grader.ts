@@ -148,10 +148,29 @@ export interface GradeOptions {
   kind?: "word" | "sentence";
 }
 
+/**
+ * Speech recognisers write numbers as digits ("od 3 lat", "3个人"). Replace each digit run
+ * with the way one of the target sentences spells that number ("trzech", "三"), so
+ * the case form or reading the sentence needs is what gets compared.
+ */
+export function spellDigits(lang: LanguageConfig, heard: string, targets: string[]): string {
+  if (!lang.numbers || !/\d/.test(heard)) return heard;
+  const spans = targets.flatMap((t) => {
+    const tokens = lang.tokenize(lang.normalize(t));
+    return lang.numbers!(tokens).map((s) => ({ value: s.value, text: tokens.slice(s.start, s.end).join(lang.tokenJoiner) }));
+  });
+  return heard.replace(/\d+/g, (d) => {
+    const span = spans.find((s) => s.value === Number(d));
+    if (!span) return d;
+    return lang.tokenJoiner === " " ? ` ${span.text} ` : span.text;
+  });
+}
+
 export function gradeLocally(lang: LanguageConfig, heardRaw: string, phrase: Phrase, opts: GradeOptions = {}): GradeResult {
   const heard = heardRaw.trim();
   const expected = phrase.text;
-  const H = prepare(lang, heard);
+  const targets = [expected, ...(phrase.accept ?? []), ...(phrase.unnatural ?? []).map((u) => u.text)];
+  const H = prepare(lang, spellDigits(lang, heard, targets));
   const E = prepare(lang, expected);
   const base = { heard, expected, source: "local" as const, marks: computeMarks(lang, H, expected) };
   const result = (verdict: Verdict, extra: Partial<GradeResult> = {}): GradeResult => ({ ...base, verdict, ...extra });

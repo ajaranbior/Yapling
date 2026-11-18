@@ -51,6 +51,33 @@ describe("polish grading", () => {
   });
 });
 
+describe("numbers written as digits by speech recognition", () => {
+  it("accepts a digit for an inflected Polish numeral", () => {
+    const p = find(polish, "Pracuję tu od trzech lat i wciąż się uczę.");
+    expect(gradeLocally(polish, "Pracuję tu od 3 lat i Wciąż się uczę", p).verdict).toBe("perfect");
+  });
+  it("accepts digits for Polish ordinals and compound numbers", () => {
+    const at: Phrase = { text: "Spotkajmy się o piątej.", translation: "" };
+    expect(gradeLocally(polish, "Spotkajmy się o 5", at).verdict).toBe("perfect");
+    const age: Phrase = { text: "Mam dwadzieścia trzy lata.", translation: "" };
+    expect(gradeLocally(polish, "Mam 23 lata", age).verdict).toBe("perfect");
+    const year: Phrase = { text: "Urodziłam się w tysiąc dziewięćset dziewięćdziesiątym piątym roku.", translation: "" };
+    expect(gradeLocally(polish, "Urodziłam się w 1995 roku", year).verdict).toBe("perfect");
+  });
+  it("a wrong number is still wrong", () => {
+    const p = find(polish, "Pracuję tu od trzech lat i wciąż się uczę.");
+    expect(gradeLocally(polish, "Pracuję tu od 4 lat i wciąż się uczę", p).verdict).not.toBe("perfect");
+  });
+  it("accepts digits for Mandarin numerals", () => {
+    const two: Phrase = { text: "我要两个。", translation: "" };
+    expect(gradeLocally(mandarin, "我要2个", two).verdict).toBe("perfect");
+    const ten: Phrase = { text: "我十五岁。", translation: "" };
+    expect(gradeLocally(mandarin, "我15岁", ten).verdict).toBe("perfect");
+    const year: Phrase = { text: "我二零二四年来的。", translation: "" };
+    expect(gradeLocally(mandarin, "我2024年来的", year).verdict).toBe("perfect");
+  });
+});
+
 describe("mandarin grading", () => {
   const where = find(mandarin, "火车站在哪儿？");
   it("exact without punctuation", () => {

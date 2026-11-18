@@ -1,4 +1,5 @@
 import { polishTopics } from "../../content/pl";
+import { polishNumbers } from "./numbers";
 import type { LanguageConfig } from "./types";
 
 const PRONOUNS = new Set(["ja", "ty", "on", "ona", "ono", "my", "wy", "oni", "one"]);
@@ -36,5 +37,6 @@ export const polish: LanguageConfig = {
       stripped: heard.filter((t) => !extra.includes(t)),
     };
   },
+  numbers: polishNumbers,
   topics: polishTopics,
 };
